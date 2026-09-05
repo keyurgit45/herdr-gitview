@@ -446,7 +446,11 @@ pub fn wrap_diff_text(text: &Text<'static>, width: usize) -> WrappedDoc {
         row_to_line.extend(std::iter::repeat_n(i, rows.len()));
         out.extend(rows);
     }
-    WrappedDoc { text: Text::from(out), row_to_line, line_to_row }
+    WrappedDoc {
+        text: Text::from(out),
+        row_to_line,
+        line_to_row,
+    }
 }
 
 /// Wrap one `Line`'s spans into one or more rows of at most `width` cells.
@@ -489,11 +493,15 @@ fn wrap_line_spans(line: &Line<'static>, width: usize, indent: usize) -> Vec<Lin
                                 row_w = 0;
                                 budget = cont_width;
                             }
-                            rows.last_mut().unwrap().push(Span::styled(ch.to_string(), style));
+                            rows.last_mut()
+                                .unwrap()
+                                .push(Span::styled(ch.to_string(), style));
                             row_w += cw;
                         }
                     } else {
-                        rows.last_mut().unwrap().push(Span::styled(word.clone(), style));
+                        rows.last_mut()
+                            .unwrap()
+                            .push(Span::styled(word.clone(), style));
                         row_w += word_w;
                     }
                     word.clear();
@@ -839,7 +847,13 @@ mod tests {
         assert_eq!(flat(&w.text.lines[1]), " ".repeat(6) + "klmn"); // then 4-col rows
         assert_eq!(flat(&w.text.lines[2]), " ".repeat(6) + "o");
         // No content lost or duplicated across the hard break.
-        let rebuilt: String = w.text.lines.iter().map(flat).collect::<String>().replace(' ', "");
+        let rebuilt: String = w
+            .text
+            .lines
+            .iter()
+            .map(flat)
+            .collect::<String>()
+            .replace(' ', "");
         assert_eq!(rebuilt, "abcdefghijklmno");
     }
 
@@ -854,7 +868,10 @@ mod tests {
         assert_eq!(flat(&w.text.lines[1]), " ".repeat(6) + "b");
         let rebuilt: String = w.text.lines.iter().map(flat).collect();
         assert!(!rebuilt.contains("12 b"), "sanity");
-        assert!(!rebuilt.contains("a b"), "the space must not survive: {rebuilt:?}");
+        assert!(
+            !rebuilt.contains("a b"),
+            "the space must not survive: {rebuilt:?}"
+        );
     }
 
     #[test]
@@ -879,10 +896,13 @@ mod tests {
             .map(|l| {
                 assert_eq!(l.spans[0].content.as_ref(), " ".repeat(6), "leading indent");
                 assert_eq!(l.spans[0].style, Style::default(), "indent has no fg");
-                l.spans[1..].iter().map(|s| {
-                    assert_eq!(s.style, style_b);
-                    s.content.as_ref()
-                }).collect::<String>()
+                l.spans[1..]
+                    .iter()
+                    .map(|s| {
+                        assert_eq!(s.style, style_b);
+                        s.content.as_ref()
+                    })
+                    .collect::<String>()
             })
             .collect();
         assert_eq!(continuations, "world");
@@ -895,16 +915,19 @@ mod tests {
         let w = wrap_diff_text(&Text::from(vec![line]), 10);
         assert!(w.text.lines.len() > 1);
         for l in &w.text.lines {
-            assert_eq!(l.style, bg, "every wrapped row keeps the source line's background");
+            assert_eq!(
+                l.style, bg,
+                "every wrapped row keeps the source line's background"
+            );
         }
     }
 
     #[test]
     fn wrap_diff_text_maps_rows_back_to_their_source_line() {
         let text = Text::from(vec![
-            Line::from("short"),               // row 0
-            Line::from("abcdefghijklmno"),      // rows 1..=3 (hard-wrapped)
-            Line::from("tail"),                 // row 4
+            Line::from("short"),           // row 0
+            Line::from("abcdefghijklmno"), // rows 1..=3 (hard-wrapped)
+            Line::from("tail"),            // row 4
         ]);
         let w = wrap_diff_text(&text, 10);
         assert_eq!(w.text.lines.len(), 5);

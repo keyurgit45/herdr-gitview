@@ -427,7 +427,9 @@ impl PreviewApp {
             }
             MouseEventKind::Drag(MouseButton::Left) if y >= 1 => {
                 let row = self.scroll as usize + (y - 1) as usize;
-                let line = self.line_of_row(row).min(self.content_lines().saturating_sub(1));
+                let line = self
+                    .line_of_row(row)
+                    .min(self.content_lines().saturating_sub(1));
                 if self.select_anchor.is_none() {
                     self.select_anchor = Some(self.cursor_line);
                 }
@@ -935,7 +937,9 @@ impl PreviewApp {
             return;
         };
         let vh = self.viewport_h.max(1) as usize;
-        let last_line = (start + len).saturating_sub(1).min(self.content_lines().saturating_sub(1));
+        let last_line = (start + len)
+            .saturating_sub(1)
+            .min(self.content_lines().saturating_sub(1));
         let start_row = self.row_of_line(start);
         let end_row = self.row_of_line(last_line) + 1; // one past the box's last row
         if end_row > self.scroll as usize + vh {
