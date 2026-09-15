@@ -363,7 +363,15 @@ fn read_from(path: &Path, offset: u64) -> Option<String> {
 pub fn harvest_screen(bin: &OsStr, h: &Handle) -> Option<String> {
     let text = run_text(
         bin,
-        &["agent", "read", &h.pane, "--source", "detection", "--lines", "200"],
+        &[
+            "agent",
+            "read",
+            &h.pane,
+            "--source",
+            "detection",
+            "--lines",
+            "200",
+        ],
     )
     .ok()?;
     Some(strip_chrome(&text, &h.prompt))
@@ -429,7 +437,10 @@ mod tests {
     #[test]
     fn blocked_is_provably_undelivered_timeout_is_not() {
         assert_eq!(PromptError::Blocked.delivered(), Some(false));
-        assert_eq!(PromptError::Busy(AgentStatus::Working).delivered(), Some(false));
+        assert_eq!(
+            PromptError::Busy(AgentStatus::Working).delivered(),
+            Some(false)
+        );
         assert_eq!(PromptError::Timeout.delivered(), None);
         assert_eq!(PromptError::Stalled.delivered(), None);
     }
@@ -465,7 +476,10 @@ mod tests {
             status: AgentStatus::Working,
             ..stale.clone()
         };
-        assert!(!turn_advanced(&h, &working), "still working = not a finished turn");
+        assert!(
+            !turn_advanced(&h, &working),
+            "still working = not a finished turn"
+        );
     }
 
     /// Write a JSONL fixture and harvest it from byte 0.
@@ -588,7 +602,10 @@ mod tests {
             "\u{276F} \n",
         );
         let got = strip_chrome(screen, "explain the auth flow");
-        assert_eq!(got, "The auth flow starts in login.ts.\n  It then calls verify().");
+        assert_eq!(
+            got,
+            "The auth flow starts in login.ts.\n  It then calls verify()."
+        );
     }
 
     #[test]

@@ -17,3 +17,4 @@ pub mod preview;
 pub mod probe;
 pub mod term;
 pub mod textarea;
+pub mod thread;

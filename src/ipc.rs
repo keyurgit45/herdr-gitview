@@ -82,12 +82,22 @@ pub enum ToPreview {
     Quit,
 }
 
+/// Wire protocol generation. Bump on any breaking change to `ToList` or
+/// `ToPreview`; the list compares it against its own and refuses to act on a
+/// snapshot it cannot interpret rather than silently mis-rendering one.
+pub const PROTO: u32 = 1;
+
 /// Messages the preview pane sends back to the list pane.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToList {
-    /// First message after accept; tells list the preview is alive.
-    Ready,
+    /// First message after accept; tells list the preview is alive. `proto`
+    /// is the only handshake hook either side has — it exists so the *next*
+    /// breaking wire change has somewhere to negotiate.
+    Ready {
+        #[serde(default)]
+        proto: u32,
+    },
     /// Editor exited (any exit code). List must refresh + re-Show + refocus.
     EditDone { file: PathBuf },
     /// GitInPane finished. `ok` = exit status 0.
@@ -101,19 +111,35 @@ pub enum ToList {
     EditRequest,
 }
 
-/// A review note as shared between the panes. The preview owns the store and
-/// allocates the ids; the list acts on notes *by id*, so a mutation between
-/// snapshot and command can never hit the wrong note.
+/// A review thread as *projected* to the list pane. The preview owns the
+/// store and allocates the ids; the list acts on threads *by id*, so a
+/// mutation between snapshot and command can never hit the wrong thread.
+///
+/// Deliberately a projection and not the thread itself: `ToList::Notes`
+/// re-sends in full on every change, so carrying `Vec<Turn>` here would make
+/// each agent reply cost O(entire review transcript) on a socket the list
+/// drains on a 40 ms debounce. The list has no surface that could render a
+/// turn anyway. If inline expansion is ever wanted, add a pull command
+/// (`ToPreview::RequestThread { id }` → `ToList::Thread { id, turns }`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteMeta {
     pub id: u64,
     pub file: PathBuf,
     pub start: u32,
     pub end: u32,
+    /// The *newest* turn's text, collapsed to one line by the renderer.
     pub text: String,
-    /// Whether this note's diff was the staged (cached) side, so the notes
-    /// view re-shows the same diff the note was written against.
+    /// Whether this thread's diff was the staged (cached) side, so the notes
+    /// view re-shows the same diff the thread was written against.
     pub cached: bool,
+    /// How many turns the conversation holds.
+    #[serde(default)]
+    pub turns: u32,
+    #[serde(default)]
+    pub state: crate::thread::ThreadState,
+    /// Who spoke last — drives the row's leading glyph.
+    #[serde(default)]
+    pub last_author: crate::thread::Author,
 }
 
 /// Collapse a (possibly multi-line) note into one display line. Note text is
@@ -289,7 +315,7 @@ mod tests {
 
         // preview -> list: every ToList variant.
         let to_list = vec![
-            ToList::Ready,
+            ToList::Ready { proto: PROTO },
             ToList::EditDone {
                 file: "a.rs".into(),
             },

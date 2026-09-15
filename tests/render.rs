@@ -194,6 +194,9 @@ fn note(id: u64, file: &str, start: u32, end: u32, text: &str) -> herdr_gitview:
         end,
         text: text.to_string(),
         cached: false,
+        turns: 1,
+        state: herdr_gitview::thread::ThreadState::Draft,
+        last_author: herdr_gitview::thread::Author::Human,
     }
 }
 

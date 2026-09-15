@@ -25,7 +25,17 @@ fn app() -> PreviewApp {
     let repo = Repo {
         root: PathBuf::from("."),
     };
-    PreviewApp::new(cfg, repo, keys)
+    PreviewApp::new(cfg, repo, keys, store_path())
+}
+
+/// A throwaway store path per test process, so persistence writes land
+/// somewhere harmless instead of the user's real plugin state dir.
+fn store_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "gitview-test-{}-{:?}.json",
+        std::process::id(),
+        std::thread::current().id()
+    ))
 }
 
 fn req(file: &str) -> ShowReq {
@@ -294,25 +304,29 @@ fn the_header_reports_the_cursor_line_not_the_scroll_offset() {
 
 // ---- note cards in the diff ------------------------------------------------
 
-fn note(id: u64, start: u32, end: u32, text: &str) -> herdr_gitview::preview::app::Note {
-    herdr_gitview::preview::app::Note {
+fn note(id: u64, start: u32, end: u32, text: &str) -> herdr_gitview::thread::Thread {
+    herdr_gitview::thread::Thread::new(
         id,
-        file: PathBuf::from("f.txt"),
-        start,
-        end,
-        text: text.to_string(),
-        snippet: String::new(),
-        cached: false,
-    }
+        herdr_gitview::thread::Anchor {
+            file: PathBuf::from("f.txt"),
+            start,
+            end,
+            cached: false,
+            snippet: String::new(),
+            blob: None,
+            head_sha: None,
+        },
+        text.to_string(),
+    )
 }
 
 /// A diff with `n` inserted lines plus the given notes, rendered once.
-fn app_with_notes(notes: Vec<herdr_gitview::preview::app::Note>) -> PreviewApp {
+fn app_with_notes(notes: Vec<herdr_gitview::thread::Thread>) -> PreviewApp {
     let mut a = app();
     let r = req("f.txt");
     a.begin_show(r.clone());
     a.apply_diff(&r, Ok(fake_diff(10)));
-    a.notes = notes;
+    a.store.threads = notes;
     a.apply_diff(&r, Ok(fake_diff(10))); // re-sync the doc with the notes
     draw(&mut a);
     a
@@ -498,7 +512,7 @@ fn a_card_appearing_under_the_cursor_pushes_it_off() {
     }
     let before = a.cursor_line;
     // A note lands right where the cursor is sitting.
-    a.notes = vec![note(1, 3, 3, "new note\nwith two lines")];
+    a.store.threads = vec![note(1, 3, 3, "new note\nwith two lines")];
     let r = req("f.txt");
     a.apply_diff(&r, Ok(fake_diff(10)));
     draw(&mut a);
@@ -548,7 +562,10 @@ fn annotating_a_range_with_no_source_lines_is_refused() {
     a.select_anchor = Some(card);
     press(&mut a, 'a');
     assert!(a.popup_request.is_none(), "should not open the note popup");
-    assert_eq!(a.active_flash(), Some("select some code to annotate"));
+    assert_eq!(
+        a.active_flash(),
+        Some("select added or context lines to annotate")
+    );
 }
 
 #[test]
@@ -650,8 +667,8 @@ fn typing_in_the_composer_grows_the_box_and_saves_on_enter() {
 
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(a.composer.is_none(), "composer should close");
-    assert_eq!(a.notes.len(), 1);
-    assert_eq!(a.notes[0].text, "first\nsecond");
+    assert_eq!(a.threads().len(), 1);
+    assert_eq!(a.threads()[0].preview(), "first\nsecond");
     // The saved note's card stands where the composer was.
     let body = body_lines(&draw(&mut a));
     assert!(body.iter().any(|l| l.contains("note · line")));
@@ -677,8 +694,8 @@ fn esc_cancels_without_leaving_a_note() {
     type_text(&mut a, "never mind");
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     assert!(a.composer.is_none());
-    assert!(a.notes.is_empty());
-    assert!(a.pending_note.is_none());
+    assert!(a.threads().is_empty());
+    assert!(a.pending.is_none());
     let body = body_lines(&draw(&mut a));
     assert!(!body.iter().any(|l| l.contains('╭')), "box left behind");
 }
@@ -688,7 +705,7 @@ fn saving_an_empty_composer_is_a_cancel() {
     let mut a = app_at(1);
     press(&mut a, 'a');
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert!(a.notes.is_empty(), "an empty note is not worth sending");
+    assert!(a.threads().is_empty(), "an empty note is not worth sending");
     assert!(a.composer.is_none());
 }
 
@@ -709,14 +726,14 @@ fn the_composer_edits_an_existing_note_in_place() {
     key(&mut a, KeyCode::Char('u'), KeyModifiers::CONTROL);
     type_text(&mut a, "rewritten");
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert_eq!(a.notes.len(), 1, "edited, not duplicated");
-    assert_eq!(a.notes[0].text, "rewritten");
+    assert_eq!(a.threads().len(), 1, "edited, not duplicated");
+    assert_eq!(a.threads()[0].preview(), "rewritten");
 }
 
 #[test]
 fn editing_a_note_in_another_file_asks_for_that_file_first() {
     let mut a = app_with_notes(vec![note(1, 3, 3, "elsewhere")]);
-    a.notes[0].file = PathBuf::from("other.rs");
+    a.store.threads[0].anchor.file = PathBuf::from("other.rs");
     // The preview knows which file the note belongs to, so it can ask for it
     // itself rather than refusing and making the list guess.
     assert!(
@@ -745,8 +762,8 @@ fn a_whole_file_note_composes_at_the_top() {
 
     type_text(&mut a, "about the file");
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert_eq!(a.notes[0].start, 0);
-    assert_eq!(a.notes[0].end, 0);
+    assert_eq!(a.threads()[0].anchor.start, 0);
+    assert_eq!(a.threads()[0].anchor.end, 0);
 }
 
 #[test]
@@ -756,7 +773,7 @@ fn the_cursor_cannot_walk_into_the_composer_either() {
     type_text(&mut a, "a\nb\nc");
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     // After cancelling, walking the doc must still never touch a card.
-    a.notes = vec![note(1, 3, 3, "x\ny")];
+    a.store.threads = vec![note(1, 3, 3, "x\ny")];
     let r = req("f.txt");
     a.apply_diff(&r, Ok(fake_diff(10)));
     draw(&mut a);
@@ -957,4 +974,63 @@ fn a_note_whose_line_is_gone_says_so_instead_of_posing_as_a_file_note() {
     let top = body.iter().position(|l| l.contains('╭')).unwrap();
     assert!(body[top].contains("whole file"));
     assert!(!body[top].contains("anchor lost"));
+}
+
+// ---- persistence -----------------------------------------------------------
+
+/// The headline claim of the threads fork: a conversation outlives the pane.
+/// Closing gitview and reopening it must bring the review back, ids intact.
+#[test]
+fn threads_survive_a_pane_restart() {
+    let dir = std::env::temp_dir().join(format!("gitview-persist-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("threads.json");
+
+    let mk = || {
+        let cfg = Config::default();
+        let keys = Keymap::build(&HashMap::new()).unwrap();
+        let repo = Repo {
+            root: PathBuf::from("."),
+        };
+        PreviewApp::new(cfg, repo, keys, path.clone())
+    };
+
+    // Session one: ask a question, then get an answer.
+    let mut a = mk();
+    let r = req("f.txt");
+    a.begin_show(r.clone());
+    a.apply_diff(&r, Ok(fake_diff(10)));
+    let id = a.store.alloc_id();
+    a.store.threads.push(note(id, 3, 3, "why is this here?"));
+    // `append_reply` is a real mutation, so it persists — no test-only hook.
+    a.append_reply(id, "because of the retry path.".into());
+    assert_eq!(a.threads()[0].turns.len(), 2);
+
+    // Session two: a brand-new app over the same store.
+    let b = mk();
+    assert_eq!(b.threads().len(), 1, "the thread came back");
+    let t = &b.threads()[0];
+    assert_eq!(
+        t.id, id,
+        "and kept its id, so list commands still address it"
+    );
+    assert_eq!(t.turns.len(), 2, "with both sides of the conversation");
+    assert_eq!(t.turns[0].text, "why is this here?");
+    assert_eq!(t.turns[1].text, "because of the retry path.");
+    assert_eq!(t.state, herdr_gitview::thread::ThreadState::Answered);
+    assert_eq!(
+        t.anchor.file,
+        PathBuf::from("f.txt"),
+        "anchored where it was written"
+    );
+
+    // And a new thread must not reuse the restored id — an id collision
+    // silently retargets every list→preview command at the wrong thread.
+    let mut c = mk();
+    assert!(
+        c.store.alloc_id() > id,
+        "a fresh id must clear the restored id {id}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

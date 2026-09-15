@@ -13,6 +13,7 @@ use ratatui::text::{Line, Span, Text};
 use crate::config::Config;
 use crate::git::{ChangeKind, Repo, Scope};
 use crate::keymap::{Action, Keymap};
+use crate::thread::{Anchor, Author, Thread, ThreadStore};
 
 /// Hard cap on rendered diff lines; beyond this we show a truncation notice so
 /// a 100k-line diff can't stall the render loop.
@@ -35,20 +36,25 @@ pub struct ShowReq {
     pub commit: Option<String>,
 }
 
-/// A batched review note, anchored to a file (and optionally a line range).
+/// What the open composer is going to do when it commits. A composer is no
+/// longer always "a new note": it can also rewrite an unsent turn or add a
+/// reply to an existing conversation.
 #[derive(Debug, Clone)]
-pub struct Note {
-    pub id: u64,
-    pub file: PathBuf,
-    /// New-file line range; 0-0 = whole file (list-side note).
-    pub start: u32,
-    pub end: u32,
-    pub text: String,
-    /// The selected diff lines (`-`/`+`/space prefixed), possibly empty.
-    pub snippet: String,
-    /// Whether this note was written against the staged (cached) diff, so
-    /// re-showing it later (notes view) picks the same side.
-    pub cached: bool,
+pub enum Target {
+    /// Start a new thread at `Pending::anchor`.
+    New,
+    /// Rewrite turn `turn` of thread `id` in place (only ever an unsent
+    /// Human turn — a delivered one is history).
+    Edit { id: u64, turn: usize },
+    /// Append a new Human turn to thread `id`.
+    Reply(u64),
+}
+
+/// The composer's subject: where it hangs and what it will do.
+#[derive(Debug, Clone)]
+pub struct Pending {
+    pub anchor: Anchor,
+    pub target: Target,
 }
 
 /// A popup the run loop should open on our behalf.
@@ -102,10 +108,13 @@ pub struct PreviewApp {
     pub cursor_line: usize,
     /// Selection anchor (`v`); selection = anchor..=cursor.
     pub select_anchor: Option<usize>,
-    /// Batched review notes across files.
-    pub notes: Vec<Note>,
-    /// Set when `a` was pressed: what the annotate popup will describe.
-    pub pending_note: Option<Note>,
+    /// Persistent review threads across files. The preview pane is the sole
+    /// owner and the sole id allocator.
+    pub store: ThreadStore,
+    /// Where the loaded store lives, so every mutation can write it back.
+    pub store_path: PathBuf,
+    /// Set when the composer is open: what it will commit.
+    pub pending: Option<Pending>,
     /// The open inline composer, if any. While set it owns every keystroke.
     pub composer: Option<Composer>,
     /// Popup for the run loop to open.
@@ -128,10 +137,8 @@ pub struct PreviewApp {
     composer_span: Option<(usize, usize)>,
     /// Note id to scroll to once its file's diff arrives (notes view hover).
     pending_focus: Option<u64>,
-    /// Bumped on every note mutation; the run loop broadcasts on change.
+    /// Bumped on every thread mutation; the run loop broadcasts on change.
     pub notes_rev: u64,
-    /// Monotonic id source for notes.
-    next_note_id: u64,
     /// Transient footer flash message.
     pub flash: Option<(String, std::time::Instant)>,
 
@@ -143,7 +150,11 @@ pub struct PreviewApp {
 }
 
 impl PreviewApp {
-    pub fn new(cfg: Config, repo: Repo, keys: Keymap) -> PreviewApp {
+    pub fn new(cfg: Config, repo: Repo, keys: Keymap, store_path: PathBuf) -> PreviewApp {
+        let (store, load_err) = ThreadStore::load(&store_path, &repo.root);
+        // The loaded threads must reach the list, and `tick` only broadcasts
+        // when `notes_rev` changed — so start at 1, not 0.
+        let notes_rev = u64::from(!store.is_empty());
         PreviewApp {
             cfg,
             repo,
@@ -159,8 +170,9 @@ impl PreviewApp {
             base: None,
             cursor_line: 0,
             select_anchor: None,
-            notes: Vec::new(),
-            pending_note: None,
+            store,
+            store_path,
+            pending: None,
             composer: None,
             popup_request: None,
             notes_view_request: false,
@@ -171,13 +183,36 @@ impl PreviewApp {
             card_starts: Vec::new(),
             composer_span: None,
             pending_focus: None,
-            notes_rev: 0,
-            next_note_id: 1,
-            flash: None,
+            notes_rev,
+            // A load failure is never fatal, but it must be visible: the
+            // alternative is a user whose review silently did not come back.
+            flash: load_err.map(|e| (e, std::time::Instant::now())),
             state: State::Splash("waiting for file list…"),
             should_quit: false,
             close_view: false,
         }
+    }
+
+    /// Every thread in the store, in creation order.
+    pub fn threads(&self) -> &[Thread] {
+        &self.store.threads
+    }
+
+    /// Write the store back. Persistence failures flash rather than panic —
+    /// losing the on-disk copy is bad, losing the in-memory review is worse.
+    fn persist(&mut self) {
+        if let Err(e) = self.store.save(&self.store_path) {
+            crate::logx::log(format!("thread store save failed: {e}"));
+            self.flash(format!("could not save threads: {e}"));
+        }
+    }
+
+    /// The single place a thread mutation is finalised: bump the revision so
+    /// the list is told, write to disk, and re-splice the cards.
+    fn threads_changed(&mut self) {
+        self.notes_rev += 1;
+        self.persist();
+        self.rebuild();
     }
 
     /// The list connected; if we haven't shown anything yet, switch the splash
@@ -304,12 +339,19 @@ impl PreviewApp {
             // composer box standing in its place *is* that note.
             let editing = self.composer.as_ref().and_then(|c| c.editing);
             let mut cards: Vec<Card> = self
-                .notes
+                .store
+                .threads
                 .iter()
-                .filter(|n| n.file == req.file && Some(n.id) != editing)
-                .map(|n| {
-                    let (anchor, lost) = card::anchor_of(built, n.end);
-                    let mut label = card::range_label("note", n.start, n.end);
+                .filter(|t| t.anchor.file == req.file && Some(t.id) != editing)
+                .map(|t| {
+                    let (anchor, lost) = card::anchor_of(built, t.anchor.end);
+                    let mut label = card::range_label("note", t.anchor.start, t.anchor.end);
+                    if t.turns.len() > 1 {
+                        label.push_str(&format!(" · {} turns", t.turns.len()));
+                    }
+                    if t.state != crate::thread::ThreadState::Draft {
+                        label.push_str(&format!(" · {}", t.state.badge()));
+                    }
                     if lost {
                         // Its line is gone from this diff (the file changed
                         // under it). Say so rather than quietly rendering it
@@ -318,22 +360,27 @@ impl PreviewApp {
                     }
                     Card {
                         anchor,
-                        lines: card::note_card(&label, &n.text, width, self.cfg.theme),
-                        note: Some(n.id),
+                        // Phase C replaces this with a nested turn render;
+                        // until then the newest turn is what you see.
+                        lines: card::note_card(&label, t.preview(), width, self.cfg.theme),
+                        note: Some(t.id),
                     }
                 })
                 .collect();
             // The composer goes in last, so among cards anchored to the same
             // line the box you are typing in sits closest to the code.
             let composing = self.composer.as_ref().map(|c| {
-                let note = self.pending_note.as_ref();
-                let (anchor, _) = card::anchor_of(built, note.map(|n| n.end).unwrap_or(0));
-                let prefix = if c.editing.is_some() {
-                    "edit note"
-                } else {
-                    "new note"
+                let pending = self.pending.as_ref();
+                let (anchor, _) =
+                    card::anchor_of(built, pending.map(|p| p.anchor.end).unwrap_or(0));
+                let prefix = match pending.map(|p| &p.target) {
+                    Some(Target::Edit { .. }) => "edit note",
+                    Some(Target::Reply(_)) => "reply",
+                    _ => "new note",
                 };
-                let (start, end) = note.map(|n| (n.start, n.end)).unwrap_or((0, 0));
+                let (start, end) = pending
+                    .map(|p| (p.anchor.start, p.anchor.end))
+                    .unwrap_or((0, 0));
                 Card {
                     anchor,
                     lines: card::composer_card(
@@ -356,6 +403,15 @@ impl PreviewApp {
                 if card.anchor > 0 {
                     card::accent_gutter(&mut doc.lines, card.anchor - 1, built);
                 }
+            }
+            // An anchor past the end of the rendered doc (the render cap, or a
+            // persisted thread that outlived the lines it was written against)
+            // splices at the end. Clamp after the gutter pass, which needs the
+            // true anchor to no-op, but before the bookkeeping below, so
+            // `card_lines` records where the card actually landed.
+            let cap = doc.lines.len();
+            for card in &mut cards {
+                card.anchor = card.anchor.min(cap);
             }
             // Ascending by anchor (stable, so notes on one line keep their
             // order), then spliced in from the bottom up so an insertion
@@ -617,8 +673,12 @@ impl PreviewApp {
             // ask it.
             Action::Edit => self.edit_request = true,
             Action::SendNotes => {
-                if self.notes.is_empty() {
-                    self.flash("no notes yet — select lines and press a");
+                if !self.store.has_unsent() {
+                    self.flash(if self.store.is_empty() {
+                        "no threads yet — select lines and press a"
+                    } else {
+                        "nothing unsent — every thread is already with the agent"
+                    });
                 } else {
                     self.popup_request = Some(PopupReq::PickAgent);
                 }
@@ -792,8 +852,14 @@ impl PreviewApp {
             let Some(bl) = self.doc_to_built(line) else {
                 continue;
             };
-            if let Some((old, new)) = built.numbers_of_line(bl) {
-                numbers.push(new.or(old).unwrap_or(0));
+            // NEW-side numbers only. `new.or(old)` put an OLD-side number
+            // into a field every consumer treats as NEW-side, which was a
+            // transient annoyance while notes lived in memory and becomes a
+            // permanently wrong anchor once they are persisted. A selection
+            // of nothing but deletions therefore has no new-side range, and
+            // is rejected below rather than silently mis-anchored.
+            if let Some((_, Some(new))) = built.numbers_of_line(bl) {
+                numbers.push(new);
             }
             if let Some(text) = built.marker_text_of_line(bl)
                 && !text.is_empty()
@@ -808,22 +874,41 @@ impl PreviewApp {
         let (start, end) = match (numbers.iter().min(), numbers.iter().max()) {
             (Some(&s), Some(&e)) if s > 0 => (s, e),
             _ => {
-                self.flash("select some code to annotate");
+                self.flash("select added or context lines to annotate");
                 return;
             }
         };
-        self.pending_note = Some(Note {
-            id: 0, // allocated when committed
-            file: req.file,
-            start,
-            end,
-            text: String::new(),
-            snippet,
-            cached: req.cached,
+        self.pending = Some(Pending {
+            anchor: self.anchor_at(req.file, start, end, snippet, req.cached),
+            target: Target::New,
         });
         self.composer = Some(Composer::new(String::new(), None));
         self.rebuild();
         self.scroll_to_composer();
+    }
+
+    /// Build an anchor, stamping it with the blob and HEAD it was written
+    /// against so `thread::reanchor` can follow the code when the agent
+    /// rewrites it.
+    fn anchor_at(
+        &self,
+        file: PathBuf,
+        start: u32,
+        end: u32,
+        snippet: String,
+        cached: bool,
+    ) -> Anchor {
+        let blob = self.repo.hash_object(&file);
+        let head_sha = self.repo.head_sha();
+        Anchor {
+            file,
+            start,
+            end,
+            cached,
+            snippet,
+            blob,
+            head_sha,
+        }
     }
 
     /// Hand a key to the open composer and act on what it asks for.
@@ -854,26 +939,52 @@ impl PreviewApp {
         let Some(composer) = self.composer.take() else {
             return;
         };
-        let editing = composer.editing;
         let Some(text) = composer.finish() else {
             // An empty note is a cancel — there is nothing to send an agent.
-            self.pending_note = None;
+            self.pending = None;
             self.select_anchor = None;
             self.rebuild();
             return;
         };
-        match editing {
-            Some(id) => {
-                self.pending_note = None;
-                self.edit_note(id, text);
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        self.select_anchor = None;
+        match pending.target {
+            Target::New => {
+                let id = self.store.alloc_id();
+                self.store
+                    .threads
+                    .push(Thread::new(id, pending.anchor, text));
             }
-            None => self.finish_annotate(text),
+            Target::Edit { id, turn } => {
+                let Some(thread) = self.store.get_mut(id) else {
+                    return;
+                };
+                match thread.turns.get_mut(turn) {
+                    // A turn that was delivered while the composer was open
+                    // is history; appending is the only honest outcome.
+                    Some(t) if t.sent => thread.push(Author::Human, text),
+                    Some(t) => {
+                        t.text = text;
+                        t.at = crate::thread::now_epoch();
+                    }
+                    None => thread.push(Author::Human, text),
+                }
+            }
+            Target::Reply(id) => {
+                let Some(thread) = self.store.get_mut(id) else {
+                    return;
+                };
+                thread.push(Author::Human, text);
+            }
         }
+        self.threads_changed();
     }
 
     fn cancel_composer(&mut self) {
         self.composer = None;
-        self.pending_note = None;
+        self.pending = None;
         self.select_anchor = None;
         self.rebuild();
     }
@@ -881,13 +992,38 @@ impl PreviewApp {
     /// Open the composer on an existing note (asked for by the notes view).
     /// Returns false when the note isn't in the shown file, so the caller can
     /// fall back rather than silently doing nothing.
+    /// Reopens the last *unsent* Human turn. Once a turn has been delivered
+    /// it is part of the conversation's history, so editing becomes a reply
+    /// instead of a rewrite.
     pub fn begin_edit_note(&mut self, id: u64) -> bool {
-        let Some(note) = self.notes.iter().find(|n| n.id == id).cloned() else {
+        let Some(thread) = self.store.get(id) else {
             return false;
         };
+        let anchor = thread.anchor.clone();
+        let (seed, target) = match thread.editable_turn() {
+            Some(turn) => (thread.turns[turn].text.clone(), Target::Edit { id, turn }),
+            None => (String::new(), Target::Reply(id)),
+        };
         self.select_anchor = None;
-        self.composer = Some(Composer::new(note.text.clone(), Some(id)));
-        self.pending_note = Some(note);
+        self.composer = Some(Composer::new(seed, Some(id)));
+        self.pending = Some(Pending { anchor, target });
+        self.rebuild();
+        self.scroll_to_composer();
+        true
+    }
+
+    /// Open the composer to add a reply turn to an existing conversation.
+    pub fn begin_reply(&mut self, id: u64) -> bool {
+        let Some(thread) = self.store.get(id) else {
+            return false;
+        };
+        let anchor = thread.anchor.clone();
+        self.select_anchor = None;
+        self.composer = Some(Composer::new(String::new(), Some(id)));
+        self.pending = Some(Pending {
+            anchor,
+            target: Target::Reply(id),
+        });
         self.rebuild();
         self.scroll_to_composer();
         true
@@ -899,14 +1035,9 @@ impl PreviewApp {
             return;
         };
         self.select_anchor = None;
-        self.pending_note = Some(Note {
-            id: 0,
-            file: req.file,
-            start: 0,
-            end: 0,
-            text: String::new(),
-            snippet: String::new(),
-            cached: req.cached,
+        self.pending = Some(Pending {
+            anchor: self.anchor_at(req.file, 0, 0, String::new(), req.cached),
+            target: Target::New,
         });
         self.composer = Some(Composer::new(String::new(), None));
         self.rebuild();
@@ -916,15 +1047,15 @@ impl PreviewApp {
     /// The Show that puts a note's own file on screen, so the composer can
     /// open on it without the list having to say which file that is.
     pub fn show_for_note(&self, id: u64) -> Option<crate::ipc::ToPreview> {
-        let note = self.notes.iter().find(|n| n.id == id)?;
-        if self.current.as_ref().map(|r| &r.file) == Some(&note.file) {
+        let thread = self.store.get(id)?;
+        if self.current.as_ref().map(|r| &r.file) == Some(&thread.anchor.file) {
             return None; // already showing it
         }
         Some(crate::ipc::ToPreview::Show {
-            file: note.file.clone(),
+            file: thread.anchor.file.clone(),
             orig_path: None,
             scope: Scope::Worktree,
-            cached: note.cached,
+            cached: thread.anchor.cached,
             kind: crate::git::ChangeKind::Modified,
             commit: None,
         })
@@ -951,48 +1082,57 @@ impl PreviewApp {
         self.clamp_scroll();
     }
 
-    /// The annotate popup returned text: commit the pending note.
+    /// The annotate popup returned text: open a thread at the pending anchor.
     pub fn finish_annotate(&mut self, text: String) {
-        if let Some(mut note) = self.pending_note.take() {
-            note.text = text;
-            note.id = self.next_note_id;
-            self.next_note_id += 1;
-            self.notes.push(note);
-            self.notes_rev += 1;
-            self.select_anchor = None;
-            self.rebuild();
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        let id = self.store.alloc_id();
+        self.store
+            .threads
+            .push(Thread::new(id, pending.anchor, text));
+        self.select_anchor = None;
+        self.threads_changed();
+    }
+
+    /// Mark every thread that just had turns delivered. Replaces the old
+    /// clear-on-send: the conversation survives so a reply can land in it.
+    pub fn mark_unsent_delivered(&mut self, agent: &crate::thread::AgentRef) {
+        let ids: Vec<u64> = self
+            .store
+            .threads
+            .iter()
+            .filter(|t| t.has_unsent())
+            .map(|t| t.id)
+            .collect();
+        for id in ids {
+            if let Some(t) = self.store.get_mut(id) {
+                t.mark_sent(agent.clone());
+            }
         }
+        self.threads_changed();
     }
 
-    pub fn clear_notes(&mut self) {
-        self.notes.clear();
-        self.notes_rev += 1;
-        self.rebuild();
-    }
-
-    pub fn edit_note(&mut self, id: u64, text: String) {
-        if let Some(note) = self.notes.iter_mut().find(|n| n.id == id) {
-            note.text = text;
-            self.notes_rev += 1;
-            self.rebuild();
+    /// Append an agent's reply to the thread that asked for it.
+    pub fn append_reply(&mut self, id: u64, text: String) {
+        if let Some(thread) = self.store.get_mut(id) {
+            thread.push(Author::Agent, text);
+            self.threads_changed();
         }
     }
 
     pub fn delete_note(&mut self, id: u64) {
-        let before = self.notes.len();
-        self.notes.retain(|n| n.id != id);
-        if self.notes.len() != before {
-            self.notes_rev += 1;
-            self.rebuild();
+        if self.store.remove(id) {
+            self.threads_changed();
         }
     }
 
     /// The notes view hovered note `idx`: scroll its card into view when its
     /// file is already shown, else remember it until that diff arrives.
     pub fn focus_note(&mut self, id: u64) {
-        let note = self.notes.iter().find(|n| n.id == id);
-        let same_file = match (note, &self.current) {
-            (Some(note), Some(req)) => note.file == req.file,
+        let thread = self.store.get(id);
+        let same_file = match (thread, &self.current) {
+            (Some(t), Some(req)) => t.anchor.file == req.file,
             _ => false,
         };
         if same_file && matches!(self.state, State::Diff) {

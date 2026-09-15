@@ -259,8 +259,14 @@ impl Session {
 
     fn on_ipc(&mut self, msg: ToList) {
         match msg {
-            ToList::Ready => {
-                if matches!(self.app.active_status(), Some("connecting…")) {
+            ToList::Ready { proto } => {
+                if proto != crate::ipc::PROTO {
+                    // Mismatched halves of the plugin (a stale preview binary
+                    // left running across an upgrade). Say so rather than
+                    // rendering a snapshot we cannot interpret.
+                    self.app
+                        .set_status("preview/list version mismatch — reopen gitview");
+                } else if matches!(self.app.active_status(), Some("connecting…")) {
                     self.app.status_msg = None;
                 }
             }

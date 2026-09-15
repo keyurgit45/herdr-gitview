@@ -327,6 +327,24 @@ impl Repo {
             .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
+    /// Content hash of a worktree file, used to tell "this thread's code is
+    /// untouched" from "the agent rewrote it and the line numbers moved".
+    /// `None` for a path that is missing or unreadable — which a caller must
+    /// treat as *changed*, never as unchanged.
+    pub fn hash_object(&self, file: &Path) -> Option<String> {
+        let path = self.root.join(file);
+        if !path.is_file() {
+            return None;
+        }
+        let out = self
+            .git_lenient(&["hash-object", "--", &path.to_string_lossy()])
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     pub fn merge_base(&self, base: &str) -> Result<String> {
         let out = self.git(&["merge-base", "HEAD", base])?;
         Ok(String::from_utf8_lossy(&out).trim().to_string())

@@ -669,7 +669,7 @@ fn current_tab_id() -> Result<String> {
 
 /// FNV-1a, hand-rolled: deterministic across runs and Rust versions, which
 /// std's DefaultHasher does not guarantee.
-fn fnv1a(s: &str) -> u64 {
+pub(crate) fn fnv1a(s: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in s.as_bytes() {
         hash ^= u64::from(*byte);
@@ -678,7 +678,7 @@ fn fnv1a(s: &str) -> u64 {
     hash
 }
 
-fn repo_hash(repo: &Path) -> String {
+pub(crate) fn repo_hash(repo: &Path) -> String {
     format!("{:016x}", fnv1a(&repo.to_string_lossy()))
 }
 

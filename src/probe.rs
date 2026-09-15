@@ -104,7 +104,11 @@ pub fn run() -> Result<()> {
     let advanced = agentio::turn_advanced(&handle, &after);
     println!(
         "  turn advanced {}  ({} -> {})",
-        if advanced { "YES" } else { "NO — STALE MATCH" },
+        if advanced {
+            "YES"
+        } else {
+            "NO — STALE MATCH"
+        },
         handle.seq0,
         after.state_change_seq
     );
@@ -165,7 +169,10 @@ fn report_harvest(bin: &OsString, handle: &agentio::Handle) {
                 println!("  -> screen LOST content, as expected for a reply over the viewport");
             }
         }
-        (Some(t), None) => println!("  transcript only ({} bytes); screen returned nothing", t.len()),
+        (Some(t), None) => println!(
+            "  transcript only ({} bytes); screen returned nothing",
+            t.len()
+        ),
         (None, Some(s)) => println!("  SCREEN ONLY ({} bytes) — transcript path failed", s.len()),
         (None, None) => println!("  NOTHING CAPTURED — this is the failure mode that kills item 4"),
     }

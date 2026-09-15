@@ -42,7 +42,8 @@ pub fn run() -> Result<()> {
     let repo = resolve_repo()?;
     let env = HostEnv::from_process();
     let in_herdr = env.in_herdr();
-    let mut app = PreviewApp::new(cfg, repo, keys);
+    let store_path = crate::thread::store_path(env.socket.as_deref(), &repo.root);
+    let mut app = PreviewApp::new(cfg, repo, keys, store_path);
 
     let (tx, rx) = mpsc::channel::<Event>();
     // While an editor owns the PTY, the input thread must stop reading stdin

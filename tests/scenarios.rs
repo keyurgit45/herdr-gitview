@@ -62,6 +62,35 @@ struct World {
 
 impl World {
     fn new(repo: TempRepo) -> World {
+        World::build(repo, false)
+    }
+
+    /// A world whose store already holds a thread on disk, started in the
+    /// real order: the preview ticks *before* the list connects. `new`
+    /// connects both panes first, which is why it cannot see a startup
+    /// broadcast that gets dropped for want of a link.
+    fn restored(repo: TempRepo, file: &str, text: &str) -> World {
+        let path = repo.dir.join(".gitview-threads-test.json");
+        let mut store = herdr_gitview::thread::ThreadStore::empty(&repo.dir);
+        let id = store.alloc_id();
+        store.threads.push(herdr_gitview::thread::Thread::new(
+            id,
+            herdr_gitview::thread::Anchor {
+                file: PathBuf::from(file),
+                start: 0,
+                end: 0,
+                cached: false,
+                snippet: String::new(),
+                blob: None,
+                head_sha: None,
+            },
+            text.to_string(),
+        ));
+        store.save(&path).unwrap();
+        World::build(repo, true)
+    }
+
+    fn build(repo: TempRepo, restored: bool) -> World {
         let host_dir = repo.dir.parent().unwrap().join(format!(
             "{}-host",
             repo.dir.file_name().unwrap().to_string_lossy()
@@ -98,10 +127,17 @@ impl World {
                 root: repo.dir.clone(),
             },
             keys,
+            repo.dir.join(".gitview-threads-test.json"),
         );
         let (preview_tx, preview_rx) = mpsc::channel();
         let mut preview = preview::Session::new(preview_app, env("w:pPREV", None), preview_tx);
         preview.set_popup_liveness(Duration::ZERO);
+        if restored {
+            // The real loop ticks unconditionally at the top of every
+            // iteration, so the first one always runs before `Connected`
+            // can have arrived.
+            preview.tick();
+        }
 
         // Wire the two panes with a real socket pair.
         let (a, b) = Conn::pair().unwrap();
@@ -306,6 +342,33 @@ fn discarding_the_last_change_clears_the_preview() {
     assert!(!w.repo.dir.join("loose.txt").exists());
 }
 
+/// Regression: the preview loads a saved review and ticks once before the
+/// list connects. That tick must not consume the revision on a snapshot the
+/// link drops, or the restored threads stay stranded in the diff pane and
+/// `n` in the list reports "no notes yet" forever.
+#[test]
+fn threads_restored_from_disk_reach_the_list_after_connecting() {
+    let repo = fixture("notes");
+    write(&repo.dir, "base.txt", "one\ntwo\nchanged\n");
+    let mut w = World::restored(repo, "base.txt", "from a previous session");
+
+    assert_eq!(
+        w.preview.app.threads().len(),
+        1,
+        "the preview reloaded the store"
+    );
+    assert_eq!(
+        w.list.app.notes.len(),
+        1,
+        "the restored thread reached the list without any user mutation"
+    );
+    assert_eq!(w.list.app.notes[0].text, "from a previous session");
+
+    // And the notes view actually opens, rather than flashing "no notes yet".
+    w.press("n");
+    assert_eq!(w.list.app.mode, Mode::Notes);
+}
+
 #[test]
 fn note_flow_annotate_edit_delete_syncs_both_panes() {
     let repo = fixture("notes");
@@ -316,7 +379,7 @@ fn note_flow_annotate_edit_delete_syncs_both_panes() {
     // inline composer, which is where every note is written.
     w.press("a");
     w.compose("please refactor this");
-    assert_eq!(w.preview.app.notes.len(), 1);
+    assert_eq!(w.preview.app.threads().len(), 1);
     assert_eq!(w.list.app.notes.len(), 1, "snapshot synced to the list");
     assert!(
         w.diff_text().contains("please refactor this"),
@@ -353,7 +416,7 @@ fn note_flow_annotate_edit_delete_syncs_both_panes() {
 
     // Delete it; the empty notes view returns to files automatically.
     w.press("d");
-    assert!(w.preview.app.notes.is_empty());
+    assert!(w.preview.app.threads().is_empty());
     assert_eq!(w.list.app.mode, Mode::Files);
 }
 
@@ -383,9 +446,9 @@ fn annotating_immediately_after_moving_still_opens_the_composer() {
     )));
     w.compose("a note on the file I just moved to");
 
-    assert_eq!(w.preview.app.notes.len(), 1);
+    assert_eq!(w.preview.app.threads().len(), 1);
     assert_eq!(
-        w.preview.app.notes[0].file,
+        w.preview.app.threads()[0].anchor.file,
         PathBuf::from("second.txt"),
         "the note landed on the wrong file"
     );
@@ -422,8 +485,11 @@ fn staged_note_notes_view_previews_the_staged_diff() {
     // Whole-file note from the list, on the now-staged file.
     w.press("a");
     w.compose("please refactor this");
-    assert_eq!(w.preview.app.notes.len(), 1);
-    assert!(w.preview.app.notes[0].cached, "note remembers staged side");
+    assert_eq!(w.preview.app.threads().len(), 1);
+    assert!(
+        w.preview.app.threads()[0].anchor.cached,
+        "note remembers staged side"
+    );
 
     // Open the notes view and hover the note — the preview must re-show the
     // staged diff, not an empty worktree one.

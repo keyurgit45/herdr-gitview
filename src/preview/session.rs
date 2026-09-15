@@ -19,6 +19,7 @@ use crate::git::{Repo, Scope};
 use crate::hostenv::HostEnv;
 use crate::ipc::{Conn, ToList, ToPreview};
 use crate::popup::{Answer, Popups};
+use crate::thread::Thread;
 
 /// Runs an argv on the pane's PTY with the TUI suspended. The real
 /// implementation wraps the terminal (see `preview::run`); tests record.
@@ -107,7 +108,9 @@ impl Session {
             }
             let _ = tx.send(Event::IpcClosed);
         });
-        let _ = conn.send(&ToList::Ready);
+        let _ = conn.send(&ToList::Ready {
+            proto: crate::ipc::PROTO,
+        });
         self.conn = Some(conn);
         self.app.on_connected();
     }
@@ -186,8 +189,14 @@ impl Session {
             ToPreview::FocusNote { id } => self.app.focus_note(id),
             ToPreview::DeleteNote { id } => self.app.delete_note(id),
             ToPreview::SendNotes => {
-                if self.app.notes.is_empty() {
-                    self.app.flash("no notes yet");
+                // "Nothing to send" is no longer "no threads": an answered
+                // conversation stays in the store but has nothing pending.
+                if !self.app.store.has_unsent() {
+                    self.app.flash(if self.app.store.is_empty() {
+                        "no threads yet"
+                    } else {
+                        "nothing unsent — every thread is already with the agent"
+                    });
                 } else {
                     self.app.popup_request = Some(app::PopupReq::PickAgent);
                 }
@@ -218,22 +227,15 @@ impl Session {
         }
 
         // Keep the list's notes view in sync whenever the store changes
-        // (add/edit/delete/clear all funnel through here).
-        if self.app.notes_rev != self.last_notes_rev {
+        // (add/edit/delete/clear all funnel through here). The link check is
+        // load-bearing: `tick` runs before the list ever connects, and a
+        // restored store arrives with `notes_rev` already at 1. Advancing the
+        // watermark for a send that `self.send` drops would strand those
+        // threads in the preview, invisible to the list until the user
+        // happened to mutate one.
+        if self.conn.is_some() && self.app.notes_rev != self.last_notes_rev {
             self.last_notes_rev = self.app.notes_rev;
-            let snapshot: Vec<_> = self
-                .app
-                .notes
-                .iter()
-                .map(|n| crate::ipc::NoteMeta {
-                    id: n.id,
-                    file: n.file.clone(),
-                    start: n.start,
-                    end: n.end,
-                    text: n.text.clone(),
-                    cached: n.cached,
-                })
-                .collect();
+            let snapshot: Vec<_> = self.app.threads().iter().map(Thread::meta).collect();
             self.send(&ToList::Notes { notes: snapshot });
         }
 
@@ -260,7 +262,15 @@ impl Session {
                             ("GITVIEW_AGENTS".to_string(), json),
                             (
                                 "GITVIEW_ASK_TEXT".to_string(),
-                                format!("send {} note(s) to…", self.app.notes.len()),
+                                format!(
+                                    "send {} unsent turn(s) to…",
+                                    self.app
+                                        .store
+                                        .threads
+                                        .iter()
+                                        .filter(|t| t.has_unsent())
+                                        .count()
+                                ),
                             ),
                         ];
                         let size = (74, (agents.len() as u16 + 6).min(14));
@@ -288,9 +298,18 @@ impl Session {
                     && let Some((pane, mode)) = answer.split_once('\t')
                 {
                     match self.deliver_notes(pane, mode == "submit") {
-                        Ok(agent) => {
-                            self.app.clear_notes();
-                            self.app.flash(format!("notes sent to {agent}"));
+                        // The threads are NOT cleared: they stay in the store
+                        // so the agent's reply has somewhere to land. What
+                        // changes is that their Human turns are now `sent`,
+                        // which is what keeps a second send from re-delivering
+                        // the whole review.
+                        Ok((agent, n)) => {
+                            // Flash first: `mark_unsent_delivered` persists, and
+                            // a save failure there must not be papered over by
+                            // the success message.
+                            self.app
+                                .flash(format!("{n} turn(s) sent to {}", agent.agent));
+                            self.app.mark_unsent_delivered(&agent);
                         }
                         Err(err) => self.app.flash(format!("send failed: {err}")),
                     }
@@ -378,29 +397,46 @@ impl Session {
             .unwrap_or(false)
     }
 
-    /// Compose the batched notes and type them into the agent pane's input
-    /// (submit optionally presses enter). Returns the agent name on success.
-    fn deliver_notes(&self, pane: &str, submit: bool) -> Result<String> {
+    /// Compose the *unsent* turns and type them into the agent pane's input
+    /// (submit optionally presses enter). Returns who it went to and how many
+    /// turns went.
+    ///
+    /// Only unsent Human turns are included. Sending the whole store would
+    /// re-deliver every answered conversation on each press, which is what
+    /// made clearing-on-send necessary in the first place.
+    ///
+    /// Still the raw `pane send-text` surface: moving to `agent prompt`
+    /// belongs with the reply worker (item 3), because `--wait` blocks and
+    /// this runs on the UI thread.
+    fn deliver_notes(&self, pane: &str, submit: bool) -> Result<(crate::thread::AgentRef, usize)> {
         let mut msg = String::new();
-        for note in &self.app.notes {
-            // Multi-line notes keep their line breaks, but continuation
-            // lines are indented so the anchor stays readable in the batch.
-            let text = indent_continuations(&note.text);
-            if note.end == 0 {
-                msg.push_str(&format!("{} — {text}\n", note.file.display()));
-            } else {
-                msg.push_str(&format!(
-                    "{}:{}-{} — {text}\n",
-                    note.file.display(),
-                    note.start,
-                    note.end,
-                ));
+        let mut sent = 0usize;
+        for thread in self.app.store.threads.iter().filter(|t| t.has_unsent()) {
+            let anchor = &thread.anchor;
+            for turn in thread.unsent() {
+                // Multi-line notes keep their line breaks, but continuation
+                // lines are indented so the anchor stays readable in the batch.
+                let text = indent_continuations(&turn.text);
+                if anchor.end == 0 {
+                    msg.push_str(&format!("{} — {text}\n", anchor.file.display()));
+                } else {
+                    msg.push_str(&format!(
+                        "{}:{}-{} — {text}\n",
+                        anchor.file.display(),
+                        anchor.start,
+                        anchor.end,
+                    ));
+                }
+                sent += 1;
             }
-            if !note.snippet.is_empty() {
+            if !anchor.snippet.is_empty() {
                 msg.push_str("```diff\n");
-                msg.push_str(&note.snippet);
+                msg.push_str(&anchor.snippet);
                 msg.push_str("```\n");
             }
+        }
+        if sent == 0 {
+            anyhow::bail!("nothing unsent");
         }
 
         let out = std::process::Command::new(&self.env.herdr_bin)
@@ -414,12 +450,25 @@ impl Session {
                 .args(["pane", "send-keys", pane, "enter"])
                 .output();
         }
-        let agent = crate::popup::workspace_agents()
+        // Key the thread on the agent's *session*, not the pane: `pane move`
+        // reassigns pane ids and an exiting agent clears its name, so a
+        // pane-keyed thread silently rebinds to whoever lands there next.
+        let found = crate::popup::workspace_agents()
             .into_iter()
-            .find(|(id, _, _, _, _)| id == pane)
-            .map(|(_, name, _, _, _)| name)
-            .unwrap_or_else(|| pane.to_string());
-        Ok(agent)
+            .find(|(id, _, _, _, _)| id == pane);
+        Ok((
+            crate::thread::AgentRef {
+                pane: pane.to_string(),
+                agent: found
+                    .map(|(_, name, _, _, _)| name)
+                    .unwrap_or_else(|| pane.to_string()),
+                session: crate::agentio::agent_get(&self.env.herdr_bin, pane)
+                    .ok()
+                    .and_then(|i| i.session.map(|s| s.value)),
+                session_kind: Some("id".to_string()),
+            },
+            sent,
+        ))
     }
 
     /// Best-effort send to the list; a broken pipe just drops the link.

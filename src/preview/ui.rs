@@ -179,11 +179,11 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &PreviewApp) {
         pairs.push((hint(Action::Select), "select".to_string()));
         pairs.push((hint(Action::Annotate), "note".to_string()));
     }
-    if !app.notes.is_empty() {
-        pairs.push((
-            hint(Action::SendNotes),
-            format!("send ({})", app.notes.len()),
-        ));
+    // Count what is actually deliverable, not how many conversations
+    // exist — an answered thread stays in the store with nothing pending.
+    let unsent = app.store.threads.iter().filter(|t| t.has_unsent()).count();
+    if unsent > 0 {
+        pairs.push((hint(Action::SendNotes), format!("send ({unsent})")));
     }
     if has_diff {
         pairs.push((
