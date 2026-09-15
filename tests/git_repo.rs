@@ -85,7 +85,7 @@ fn staged_unstaged_partial() {
     write(&t.dir, "partial.txt", "p1\np2\n");
 
     let entries = t.repo.worktree_status(true).unwrap();
-    let by_path = |p: &str| entries.iter().find(|e| e.path == *p).unwrap();
+    let by_path = |p: &str| entries.iter().find(|e| e.path == Path::new(p)).unwrap();
 
     let staged = by_path("staged.txt");
     assert_eq!(
@@ -118,7 +118,7 @@ fn rename_untracked_spaces_binary() {
     git(&t.dir, &["add", "blob.bin"]);
 
     let entries = t.repo.worktree_status(true).unwrap();
-    let by_path = |p: &str| entries.iter().find(|e| e.path == *p).unwrap();
+    let by_path = |p: &str| entries.iter().find(|e| e.path == Path::new(p)).unwrap();
 
     let renamed = by_path("renamed.txt");
     assert_eq!(renamed.kind, ChangeKind::Renamed);
@@ -162,7 +162,7 @@ fn branch_scope_changes_vs_main() {
     let entries = t.repo.branch_changes(&mb).unwrap();
 
     assert_eq!(entries.len(), 2);
-    let by_path = |p: &str| entries.iter().find(|e| e.path == *p).unwrap();
+    let by_path = |p: &str| entries.iter().find(|e| e.path == Path::new(p)).unwrap();
     let feat = by_path("feat.txt");
     assert_eq!((feat.kind, feat.stage), (ChangeKind::Added, StageState::NA));
     assert_eq!((feat.adds, feat.dels), (Some(2), Some(0)));
@@ -255,7 +255,7 @@ fn entry_for<'a>(
 ) -> &'a herdr_gitview::git::FileEntry {
     entries
         .iter()
-        .find(|e| e.path == *p)
+        .find(|e| e.path == Path::new(p))
         .unwrap_or_else(|| panic!("no entry for {p}"))
 }
 
