@@ -131,14 +131,73 @@ impl std::fmt::Display for PromptError {
 /// (or raw stderr) on failure. `herdr_cli::run_json` discards stderr, which
 /// turns `agent_not_idle` into a silent `None`; this must not.
 pub fn run_text(bin: &OsStr, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(bin)
+    run_text_within(bin, args, READ_TIMEOUT)
+}
+
+/// Every call here is bounded. The reply worker is a single serial thread, so
+/// one `herdr` invocation that never returns — a restarted daemon leaving a
+/// socket that accepts and then goes quiet — parks it forever, and every
+/// thread queued behind it silently never sends. A timeout turns that into a
+/// visible per-thread failure.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Room for herdr's own `--timeout` to fire and report properly before we
+/// give up on it. Only reached if herdr itself has wedged.
+const PROMPT_SLACK: std::time::Duration = std::time::Duration::from_secs(30);
+
+pub fn run_text_within(
+    bin: &OsStr,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = Command::new(bin)
         .args(args)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("spawn failed: {e}"))?;
-    if out.status.success() {
-        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+
+    // Drained on their own threads: polling `try_wait` while a child fills a
+    // pipe buffer it cannot flush would deadlock both sides.
+    fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut s) = pipe {
+                let _ = s.read_to_end(&mut buf);
+            }
+            buf
+        })
     }
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let t_out = drain(child.stdout.take());
+    let t_err = drain(child.stderr.take());
+
+    let deadline = std::time::Instant::now() + timeout;
+    let mut nap = std::time::Duration::from_millis(5);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {}
+            Err(e) => return Err(format!("wait failed: {e}")),
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("timed out after {}s", timeout.as_secs()));
+        }
+        std::thread::sleep(nap);
+        nap = (nap * 2).min(std::time::Duration::from_millis(100));
+    };
+    let stdout = t_out.join().unwrap_or_default();
+    let stderr_raw = t_err.join().unwrap_or_default();
+
+    if status.success() {
+        return Ok(String::from_utf8_lossy(&stdout).into_owned());
+    }
+    let stderr = String::from_utf8_lossy(&stderr_raw);
     // herdr errors are JSON on stderr: {"error":{"code":..,"message":..}}
     if let Ok(v) = serde_json::from_str::<Value>(&stderr) {
         let code = v.pointer("/error/code").and_then(Value::as_str);
@@ -271,7 +330,10 @@ pub fn prompt_wait(bin: &OsStr, h: &Handle, timeout_ms: u64) -> Result<AgentInfo
         "--timeout",
         &timeout,
     ];
-    let text = run_text(bin, &args).map_err(|e| {
+    // This one legitimately runs for as long as the agent thinks, so it gets
+    // herdr's own budget plus slack rather than the short read timeout.
+    let budget = std::time::Duration::from_millis(timeout_ms) + PROMPT_SLACK;
+    let text = run_text_within(bin, &args, budget).map_err(|e| {
         if e.starts_with("agent_blocked") {
             PromptError::Blocked
         } else if e.starts_with("agent_prompt_stalled") {
@@ -419,6 +481,64 @@ fn strip_chrome(screen: &str, prompt: &str) -> String {
         out.pop();
     }
     out.join("\n")
+}
+
+#[cfg(test)]
+mod subprocess_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// The reply worker is a single serial thread. Before this bound, one
+    /// `herdr` call that never returned parked it forever and every thread
+    /// queued behind it silently never sent.
+    #[test]
+    fn a_hung_command_times_out_rather_than_parking_the_caller() {
+        let start = Instant::now();
+        let err = run_text_within(
+            OsStr::new("/bin/sleep"),
+            &["30"],
+            Duration::from_millis(300),
+        )
+        .expect_err("a 30s sleep must not be waited out");
+        assert!(err.contains("timed out"), "{err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "returned in {:?}, so it waited for the child",
+            start.elapsed()
+        );
+    }
+
+    /// The drain threads exist for this: polling `try_wait` while a child
+    /// fills a pipe it cannot flush deadlocks both sides. 1 MB is well past
+    /// the usual 64 KB pipe buffer.
+    #[test]
+    fn output_larger_than_a_pipe_buffer_does_not_deadlock() {
+        let out = run_text_within(
+            OsStr::new("/bin/sh"),
+            &["-c", "yes hello | head -c 1000000"],
+            Duration::from_secs(20),
+        )
+        .expect("must not deadlock or time out");
+        assert_eq!(out.len(), 1_000_000);
+    }
+
+    #[test]
+    fn a_normal_command_still_returns_its_stdout() {
+        let out = run_text_within(OsStr::new("/bin/echo"), &["hi"], Duration::from_secs(5))
+            .expect("echo should succeed");
+        assert_eq!(out.trim(), "hi");
+    }
+
+    #[test]
+    fn a_failing_command_reports_its_stderr() {
+        let err = run_text_within(
+            OsStr::new("/bin/sh"),
+            &["-c", "echo boom >&2; exit 1"],
+            Duration::from_secs(5),
+        )
+        .expect_err("exit 1 is an error");
+        assert_eq!(err, "boom");
+    }
 }
 
 #[cfg(test)]
