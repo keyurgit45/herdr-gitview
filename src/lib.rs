@@ -1,3 +1,4 @@
+pub mod agentio;
 pub mod annotate;
 pub mod ask;
 pub mod config;
@@ -13,5 +14,6 @@ pub mod nvim;
 pub mod orchestrate;
 pub mod popup;
 pub mod preview;
+pub mod probe;
 pub mod term;
 pub mod textarea;
