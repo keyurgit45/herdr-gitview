@@ -260,6 +260,15 @@ impl Session {
             ToPreview::Scroll { delta } => self.app.scroll_by(delta),
             ToPreview::Page { down, full } => self.app.page(down, full),
             ToPreview::Clear => self.app.clear(),
+            ToPreview::ShowCommitMessage {
+                short,
+                subject,
+                author,
+                date,
+                body,
+            } => self
+                .app
+                .show_commit_message(&short, &subject, &author, &date, &body),
             // A compose request carries the Show it needs, so it never
             // depends on a debounced one having landed first.
             ToPreview::ComposeNote { show } => {

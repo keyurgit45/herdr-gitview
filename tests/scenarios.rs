@@ -726,3 +726,49 @@ fn quit_hands_shakes_both_panes_down() {
     assert!(w.list.should_quit());
     assert!(w.preview.should_quit(), "preview received Quit over IPC");
 }
+
+/// `m` in the log view puts the whole commit message in the preview pane.
+///
+/// The list pane is ~40 columns in practice, which truncates the subject and
+/// has nowhere to put a body at all — so the text has to cross the IPC link
+/// and land in the wide pane. This covers that whole path: the keypress, the
+/// message, and what the preview ends up rendering.
+#[test]
+fn m_in_the_log_view_shows_the_whole_commit_message_in_the_preview() {
+    let repo = fixture("commit-message");
+    common::write(&repo.dir, "base.txt", "one\ntwo\nthree\n");
+    common::git(&repo.dir, &["add", "."]);
+    common::git(
+        &repo.dir,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "tighten the retry budget",
+            "-m",
+            "The old budget let a stalled upstream hold the queue.",
+        ],
+    );
+    common::write(&repo.dir, "base.txt", "one\ntwo\nthree\nfour\n");
+    let mut w = World::new(repo);
+
+    w.press("l");
+    assert_eq!(w.list.app.mode, Mode::Log, "l opens the log view");
+
+    w.press("m");
+
+    let shown = w.diff_text();
+    assert!(
+        shown.contains("tighten the retry budget"),
+        "subject missing from the preview: {shown:?}"
+    );
+    assert!(
+        shown.contains("The old budget let a stalled upstream hold the queue."),
+        "body missing from the preview — this is the whole point: {shown:?}"
+    );
+    assert!(
+        matches!(w.preview.app.state, State::Message(_)),
+        "preview should be in message state, was {:?}",
+        w.preview.app.state
+    );
+}

@@ -63,6 +63,7 @@ pub enum PopupReq {
     PickAgent,
 }
 
+#[derive(Debug)]
 pub enum State {
     /// Nothing to show yet: dim centered message.
     Splash(&'static str),
@@ -74,6 +75,8 @@ pub enum State {
     Binary,
     /// The diff build failed; holds the first stderr line.
     Error(String),
+    /// A commit message is loaded in `doc`; holds the header label.
+    Message(String),
 }
 
 pub struct PreviewApp {
@@ -251,6 +254,56 @@ impl PreviewApp {
         self.first_change = None;
         self.scroll = 0;
         self.state = State::Splash("no file selected");
+    }
+
+    /// Render a commit message as the document. Deliberately reuses `doc` and
+    /// the normal scroll path rather than a popup, so a long message wraps,
+    /// scrolls and page-downs exactly like a diff does.
+    ///
+    /// `built` is cleared: fold-expansion and note anchoring key off the shown
+    /// diff, and neither means anything for prose. The next `Show` replaces
+    /// all of this.
+    pub fn show_commit_message(
+        &mut self,
+        short: &str,
+        subject: &str,
+        author: &str,
+        date: &str,
+        body: &str,
+    ) {
+        use ratatui::style::Modifier;
+
+        self.current = None;
+        self.built = None;
+        self.shown_file = None;
+        self.saved_tint.clear();
+        self.card_lines.clear();
+        self.first_change = None;
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            subject.to_string(),
+            Style::new()
+                .fg(crate::palette::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("{short} · {author} · {date}"),
+            Style::new().add_modifier(Modifier::DIM),
+        )));
+        if !body.is_empty() {
+            lines.push(Line::default());
+            // Kept verbatim, including blank lines and indentation: a commit
+            // message's own layout is part of what you came to read.
+            for raw in body.lines() {
+                lines.push(Line::from(Span::raw(raw.to_string())));
+            }
+        }
+
+        self.doc = Text::from(lines);
+        self.sync_wrapped();
+        self.scroll = 0;
+        self.state = State::Message(format!("{short} {subject}"));
     }
 
     // ---- Show / diff results ---------------------------------------------

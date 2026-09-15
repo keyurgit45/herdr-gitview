@@ -171,6 +171,10 @@ impl Session {
             self.activate_selection();
         } else if free && action == Some(Action::Commit) && self.app.mode == app::Mode::Files {
             self.start_commit();
+        // `m`: read the selected commit's message in full. Needs the link,
+        // since the text is rendered by the preview pane.
+        } else if free && action == Some(Action::CommitMessage) {
+            self.show_commit_message();
         // `r` with a dead preview link retries the connection too.
         } else if action == Some(Action::Refresh) && self.conn.is_none() {
             if spawn_connector(&self.tx, self.env.socket.clone(), self.reconnect_budget) {
@@ -461,6 +465,36 @@ impl Session {
 
     /// Enter (or a double-click): open the selected commit in the log view,
     /// or the selected file in the editor — remotely switching a running nvim.
+    /// `m`: send the selected commit's full message to the preview pane.
+    ///
+    /// Works at both history levels — browsing the log, and inside one
+    /// commit's file list, where `app.commit` is the commit you opened.
+    fn show_commit_message(&mut self) {
+        let info = match self.app.mode {
+            app::Mode::Log => self.app.selected_commit().cloned(),
+            app::Mode::CommitFiles => self.app.commit.clone(),
+            _ => {
+                self.app
+                    .set_status("no commit here — open the log first (l)");
+                return;
+            }
+        };
+        let Some(info) = info else {
+            self.app.set_status("no commit selected");
+            return;
+        };
+        self.send(&ToPreview::ShowCommitMessage {
+            short: info.short.clone(),
+            subject: info.subject.clone(),
+            author: info.author.clone(),
+            date: info.date.clone(),
+            body: info.body.clone(),
+        });
+        if info.body.is_empty() {
+            self.app.set_status("commit has no message body");
+        }
+    }
+
     fn activate_selection(&mut self) {
         match self.app.mode {
             app::Mode::Log => self.app.open_commit(),

@@ -67,6 +67,7 @@ theme = "dark"
 # notes_view = "n"          # list every thread in the repo
 # delete = "d"              # delete the selected thread (notes view)
 # toggle_thread = "z"       # collapse/expand a thread card in the diff
+# commit_message = "m"      # read the selected commit's full message (log view)
 # refresh = "r"
 # help = "?"
 # quit = "q"                # also: esc

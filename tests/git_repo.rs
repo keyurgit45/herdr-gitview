@@ -772,3 +772,59 @@ fn the_file_list_starts_even_when_git_status_cannot_run() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The log format packs subject and body into the same NUL-separated record.
+/// A body is multi-line, may contain blank lines, and is absent entirely for
+/// a subject-only commit — so the parser has to stay in step across records
+/// rather than reading a fixed number of lines.
+#[test]
+fn log_reads_full_commit_messages_including_multiline_bodies() {
+    let t = fixture("log-bodies");
+
+    write(&t.dir, "a.txt", "a\n");
+    git(&t.dir, &["add", "."]);
+    git(&t.dir, &["commit", "-q", "-m", "subject only"]);
+
+    write(&t.dir, "b.txt", "b\n");
+    git(&t.dir, &["add", "."]);
+    git(
+        &t.dir,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "fix the thing",
+            "-m",
+            "First paragraph explaining why.\n\nSecond paragraph after a blank line.",
+        ],
+    );
+
+    let commits = t.repo.log_commits(10).unwrap();
+    // Newest first.
+    assert_eq!(commits[0].subject, "fix the thing");
+    assert!(
+        commits[0].body.contains("First paragraph explaining why."),
+        "body lost: {:?}",
+        commits[0].body
+    );
+    assert!(
+        commits[0]
+            .body
+            .contains("Second paragraph after a blank line."),
+        "body truncated at the blank line: {:?}",
+        commits[0].body
+    );
+    assert!(
+        commits[0].body.contains("\n\n"),
+        "blank line inside the body was flattened: {:?}",
+        commits[0].body
+    );
+
+    // A subject-only commit must yield an empty body, not the next commit's.
+    assert_eq!(commits[1].subject, "subject only");
+    assert_eq!(commits[1].body, "");
+
+    // And the record after it must still line up.
+    assert_eq!(commits[2].subject, "base");
+    assert_eq!(commits[2].body, "");
+}

@@ -59,6 +59,16 @@ pub enum ToPreview {
     },
     /// Nothing is selected any more (list emptied) — drop the shown diff.
     Clear,
+    /// The log view asked to read a commit message in full. The list pane is
+    /// too narrow to wrap a real message, and the preview is sitting empty
+    /// until a file is picked, so the text goes there.
+    ShowCommitMessage {
+        short: String,
+        subject: String,
+        author: String,
+        date: String,
+        body: String,
+    },
     /// The list asked for a whole-file note: the preview shows this diff and
     /// opens its inline composer on it, so notes are always written in the
     /// same place. The `Show` rides along rather than being assumed already

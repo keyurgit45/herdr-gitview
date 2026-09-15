@@ -20,6 +20,9 @@ pub struct CommitInfo {
     pub author: String,
     pub date: String,
     pub subject: String,
+    /// Everything after the subject line, verbatim. Empty for the many
+    /// commits that are a subject and nothing else.
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -480,9 +483,11 @@ impl Repo {
     /// (`<base>..HEAD`); `None` walks all of HEAD's history.
     pub fn log_range(&self, range: Option<&str>, limit: usize) -> Result<Vec<CommitInfo>> {
         let n = limit.to_string();
+        // NUL-separated because %s and %b are free-form; a commit message can
+        // contain anything except a NUL, which git itself forbids.
         let mut args = vec![
             "log",
-            "--format=%H%x00%h%x00%an%x00%ad%x00%s%x00",
+            "--format=%H%x00%h%x00%an%x00%ad%x00%s%x00%b%x00",
             "--date=short",
             "-n",
             &n,
@@ -494,7 +499,8 @@ impl Repo {
         let text = String::from_utf8_lossy(&raw);
         let mut fields = text.split('\0');
         let mut commits = Vec::new();
-        while let (Some(sha), Some(short), Some(author), Some(date), Some(subject)) = (
+        while let (Some(sha), Some(short), Some(author), Some(date), Some(subject), Some(body)) = (
+            fields.next(),
             fields.next(),
             fields.next(),
             fields.next(),
@@ -511,6 +517,9 @@ impl Repo {
                 author: author.to_string(),
                 date: date.to_string(),
                 subject: subject.to_string(),
+                // git pads %b with a trailing newline, and emits nothing at
+                // all for a subject-only commit.
+                body: body.trim_end().to_string(),
             });
         }
         Ok(commits)

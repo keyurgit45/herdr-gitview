@@ -319,6 +319,10 @@ impl App {
             // Collapsing a thread card acts on the card in the diff, which
             // only the preview pane draws. Nothing to do on this side.
             Action::ToggleThread => {}
+            // Needs the IPC link (the preview renders the message), so the
+            // session intercepts it before this point. Reached only when the
+            // link is down or nvim owns the pane.
+            Action::CommitMessage => self.set_status("preview pane is not available"),
             Action::Delete => {
                 if self.mode == Mode::Notes {
                     self.delete_note_request = self.selected_note().map(|n| n.id);

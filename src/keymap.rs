@@ -36,6 +36,8 @@ pub enum Action {
     Delete,
     /// Collapse/expand the thread card under the cursor (preview pane).
     ToggleThread,
+    /// Show the full commit message of the commit under the cursor (log view).
+    CommitMessage,
     Refresh,
     Help,
     Quit,
@@ -70,6 +72,7 @@ pub const DEFAULT_KEYS: &[(Action, &str, &[&str])] = &[
     (Action::NotesView, "notes_view", &["n"]),
     (Action::Delete, "delete", &["d"]),
     (Action::ToggleThread, "toggle_thread", &["z"]),
+    (Action::CommitMessage, "commit_message", &["m"]),
     (Action::Refresh, "refresh", &["r"]),
     (Action::Help, "help", &["?"]),
     (Action::Quit, "quit", &["q", "esc"]),

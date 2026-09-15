@@ -33,6 +33,7 @@ const HELP_ACTIONS: &[(Action, &str)] = &[
     (Action::SendNotes, "send notes to an agent"),
     (Action::Select, "select lines (preview)"),
     (Action::ToggleThread, "collapse / expand a thread (preview)"),
+    (Action::CommitMessage, "full commit message (log view)"),
     (Action::ScrollDown, "scroll diff down"),
     (Action::ScrollUp, "scroll diff up"),
     (Action::HalfPageDown, "half page down"),
@@ -496,6 +497,7 @@ fn footer_hints(app: &App, width: usize) -> Line<'static> {
             let mut pairs = Vec::new();
             if !app.commits.is_empty() {
                 pairs.push((sym(app.keys.hint(Action::Edit)), "show commit"));
+                pairs.push((sym(app.keys.hint(Action::CommitMessage)), "message"));
             }
             pairs.push((
                 sym(app.keys.hint(Action::ToggleScope)),
@@ -515,6 +517,7 @@ fn footer_hints(app: &App, width: usize) -> Line<'static> {
                 pairs.push((sym(app.keys.hint(Action::Edit)), "edit"));
                 pairs.push((sym(app.keys.hint(Action::HalfPageDown)), "scroll"));
             }
+            pairs.push((sym(app.keys.hint(Action::CommitMessage)), "message"));
             pairs.push((sym(app.keys.hint(Action::Quit)), "back"));
             pairs.push((sym(app.keys.hint(Action::Help)), "help"));
             pairs

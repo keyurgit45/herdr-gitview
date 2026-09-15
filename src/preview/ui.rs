@@ -113,7 +113,9 @@ fn render_body(frame: &mut Frame, area: Rect, app: &PreviewApp) {
             ));
             frame.render_widget(Paragraph::new(line), area);
         }
-        State::Diff => {
+        // A commit message scrolls through the same wrapped-document path as
+        // a diff; only the header differs.
+        State::Diff | State::Message(_) => {
             let para = Paragraph::new(app.wrapped_text()).scroll((app.scroll, 0));
             frame.render_widget(para, area);
         }

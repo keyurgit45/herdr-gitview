@@ -39,7 +39,8 @@ https://github.com/user-attachments/assets/1cfdf22a-fc5a-40e2-af6c-546156d05c3b
 - **Commit history** - `l` opens a `git log` view; pick a commit to browse its
   files and per-commit diffs. `w` filters it to just the commits your branch
   added on top of its base (and opening the log from branch scope starts
-  there).
+  there). `m` reads the selected commit's full message - subject, author, date
+  and body - in the wide pane, where a real message actually fits.
 - **Knows what your branch was cut from** - branch scope diffs against the
   branch you actually branched off, so a branch stacked on another feature
   branch shows only its own work instead of both.
@@ -204,8 +205,8 @@ Grammar: `[ctrl+][alt+][shift+]<key>` where `<key>` is a single character or
 `enter`, `esc`, `tab`, `space`, `up`, `down`, `left`, `right`, `pgup`,
 `pgdn`, `home`, `end`. Action names: `down up top bottom edit stage unstage
 discard commit log annotate select send_notes notes_view delete toggle_scope
-refresh help quit half_page_down half_page_up diff_top diff_bottom
-scroll_down scroll_up`.
+toggle_cached toggle_thread commit_message refresh help quit half_page_down
+half_page_up diff_top diff_bottom scroll_down scroll_up`.
 
 ## Limitations
 
