@@ -165,8 +165,20 @@ impl Thread {
     }
 
     /// The list-row preview line: the newest turn.
+    /// One-line stand-in for the thread, used by the notes view.
+    ///
+    /// Your newest note, not the newest turn: an agent's reply is read in its
+    /// own pane, and a notes list showing the agent's words back to you says
+    /// nothing about what *you* asked. Falls back to the last turn only for
+    /// the degenerate case of a thread with no Human turn at all.
     pub fn preview(&self) -> &str {
-        self.turns.last().map(|t| t.text.as_str()).unwrap_or("")
+        self.turns
+            .iter()
+            .rev()
+            .find(|t| t.author == Author::Human)
+            .or_else(|| self.turns.last())
+            .map(|t| t.text.as_str())
+            .unwrap_or("")
     }
 
     pub fn has_unsent(&self) -> bool {
@@ -508,7 +520,10 @@ mod tests {
         t.push(Author::Agent, "because.".into());
         assert_eq!(t.state, ThreadState::Answered);
         assert!(!t.has_unsent(), "an agent turn is not something we send");
-        assert_eq!(t.preview(), "because.");
+        // The reply is stored, but `preview` is your own newest note — the
+        // notes view lists what you asked, not what came back.
+        assert_eq!(t.turns.last().unwrap().text, "because.");
+        assert_eq!(t.preview(), "why?");
     }
 
     #[test]

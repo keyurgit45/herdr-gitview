@@ -415,14 +415,24 @@ fn an_agents_reply_lands_in_the_thread_that_asked_and_reaches_both_panes() {
     assert_eq!(t.turns.len(), 2);
     assert_eq!(t.turns[1].author, Author::Agent);
     assert_eq!(t.turns[1].text, "checked.");
+    // The reply is captured and persisted above, but deliberately not drawn:
+    // it is read in the agent's own pane rather than inline in the diff,
+    // where paragraphs of answer would bury the code being reviewed.
     assert!(
-        w.diff_text().contains("checked."),
-        "the reply is rendered in the card:\n{}",
+        !w.diff_text().contains("checked."),
+        "the agent's reply must not be rendered in the card:\n{}",
         w.diff_text()
     );
+    // A single word, so a narrow card wrapping the note cannot split it.
+    assert!(
+        w.diff_text().contains("safe?"),
+        "your own note is still shown:\n{}",
+        w.diff_text()
+    );
+    // Same rule for the notes view's one-line projection.
     assert_eq!(
-        w.list.app.notes[0].text, "checked.",
-        "and the list's projection followed"
+        w.list.app.notes[0].text, "why is this safe?",
+        "the list shows what you asked, not what the agent said back"
     );
 }
 

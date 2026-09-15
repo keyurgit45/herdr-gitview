@@ -101,34 +101,22 @@ pub fn accent_gutter(lines: &mut [Line<'static>], idx: usize, built: &super::ren
     }
 }
 
-/// Who said a turn, as it is labelled inside the card. The agent's own name
-/// is used when we know it, so a card reads "claude:" rather than "agent:".
-fn role_label(turn: &crate::thread::Turn, agent: Option<&str>) -> (String, Style) {
-    use crate::thread::Author;
-    match turn.author {
-        Author::Human => ("you".to_string(), Style::new().fg(palette::ACCENT)),
-        Author::Agent => (
-            agent.unwrap_or("agent").to_string(),
-            Style::new().fg(palette::OK),
-        ),
-        Author::System => ("system".to_string(), Style::new().fg(palette::BAD)),
-    }
-}
-
-/// A whole conversation as one boxed block:
+/// Your side of a conversation as one boxed block:
 ///
 /// ```text
 ///   ╭─ note · lines 12-20 · 2 turns · replied ──╮
-///   │ you                                       │
-///   │   why is this unwrap safe?                │
-///   │                                           │
-///   │ claude                                    │
-///   │   the caller guarantees the key exists.   │
+///   │ why is this unwrap safe?                  │
 ///   ╰───────────────────────────────────────────╯
 /// ```
 ///
-/// Collapsed, it shows only the newest turn plus a count of what is hidden —
-/// a long conversation must not push the code it is about off the screen.
+/// Only Human turns are drawn. The agent's reply is captured and persisted,
+/// and the title's `replied` badge says it arrived — but it is read in the
+/// agent's own pane rather than here, because an answer several paragraphs
+/// long would bury the code the card is attached to. The turn count in the
+/// title still counts the whole conversation.
+///
+/// Collapsed, it shows only your newest note plus a count of what is hidden,
+/// which matters once a thread has follow-ups.
 pub fn thread_card(
     title: Vec<Span<'static>>,
     thread: &crate::thread::Thread,
@@ -137,49 +125,47 @@ pub fn thread_card(
     collapsed: bool,
 ) -> Vec<Line<'static>> {
     let text_w = card_text_width(width);
-    let agent = thread.agent.as_ref().map(|a| a.agent.as_str());
+
+    // Only your own turns are drawn. An agent's reply routinely runs to
+    // several paragraphs, and rendering it inline buries the very code the
+    // card is commenting on — while the answer is already on screen in the
+    // agent's own pane. The reply is still captured, still persisted, and
+    // still drives the "replied" badge in this card's title; the card simply
+    // does not repeat it.
+    //
+    // Because every drawn turn is therefore yours, there are no role labels
+    // and no indent: a blank line is enough to separate one from the next.
+    let mine: Vec<&crate::thread::Turn> = thread
+        .turns
+        .iter()
+        .filter(|t| t.author == crate::thread::Author::Human)
+        .collect();
 
     let shown: Vec<&crate::thread::Turn> = if collapsed {
-        thread.turns.iter().rev().take(1).collect()
+        mine.iter().rev().take(1).copied().collect()
     } else {
-        thread.turns.iter().collect()
+        mine.clone()
     };
-    let hidden = thread.turns.len() - shown.len();
-
-    // A conversation needs to say who is speaking; a lone unsent note does
-    // not — labelling it "you" is noise, and costs the card a line on by far
-    // the most common case. Turn text is then indented under its role so the
-    // roles form a column you can scan without reading the prose.
-    let voiced = thread.turns.len() > 1;
-    let body_w = if voiced {
-        text_w.saturating_sub(2).max(1)
-    } else {
-        text_w
-    };
+    let hidden = mine.len() - shown.len();
 
     let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
     if hidden > 0 {
         rows.push(vec![Span::styled(
             format!(
-                "… {hidden} earlier turn{}",
+                "… {hidden} earlier note{}",
                 if hidden == 1 { "" } else { "s" }
             ),
             dim_style(),
         )]);
     }
     for (i, turn) in shown.iter().enumerate() {
-        // A blank line between turns, never before the first one.
+        // A blank line between notes, never before the first one.
         if i > 0 || hidden > 0 {
             rows.push(vec![Span::raw(String::new())]);
         }
-        if voiced {
-            let (role, style) = role_label(turn, agent);
-            rows.push(vec![Span::styled(role, style)]);
-        }
         for logical in turn.text.split('\n') {
-            for piece in crate::textarea::wrap_plain(logical, body_w) {
-                let row = if voiced { format!("  {piece}") } else { piece };
-                rows.push(vec![Span::raw(row)]);
+            for piece in crate::textarea::wrap_plain(logical, text_w) {
+                rows.push(vec![Span::raw(piece)]);
             }
         }
     }

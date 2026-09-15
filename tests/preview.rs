@@ -343,6 +343,21 @@ fn conversation(id: u64, line: u32, question: &str, answer: &str) -> herdr_gitvi
     t
 }
 
+/// A conversation that already got an answer and then a follow-up from you,
+/// so the card has two of *your* turns to show or hide. Cards render only
+/// Human turns, so a plain `conversation` has nothing to collapse.
+fn conversation_with_followup(
+    id: u64,
+    line: u32,
+    question: &str,
+    answer: &str,
+    followup: &str,
+) -> herdr_gitview::thread::Thread {
+    let mut t = conversation(id, line, question, answer);
+    t.push(herdr_gitview::thread::Author::Human, followup.to_string());
+    t
+}
+
 /// A diff with `n` inserted lines plus the given notes, rendered once.
 fn app_with_notes(notes: Vec<herdr_gitview::thread::Thread>) -> PreviewApp {
     let mut a = app();
@@ -400,29 +415,29 @@ fn a_conversation_renders_each_turn_under_its_speaker() {
     let body: Vec<String> = (1..H - 1).map(|y| row(&buf, y)).collect();
     let top = body.iter().position(|l| l.contains('╭')).expect("no card");
 
-    // Title carries the turn count and the state badge.
+    // Title still carries the turn count and the state badge — the badge is
+    // how you know an answer arrived, since the card no longer shows one.
     assert!(body[top].contains("2 turns"), "title: {:?}", body[top]);
     assert!(body[top].contains("replied"), "title: {:?}", body[top]);
 
-    // Both turns are present, each under its own speaker, in order.
+    // Your note is shown; the agent's reply is deliberately not. It is read
+    // in the agent's own pane, where it does not bury the diff.
     let card = body[top..].join("\n");
-    let you = card.find("you").expect("no human role label");
-    let q = card.find("why is this safe?").expect("no question");
-    let claude = card.find("claude").expect("agent named by its own name");
-    let an = card.find("the caller checks it first.").expect("no answer");
+    assert!(card.contains("why is this safe?"), "no question:\n{card}");
     assert!(
-        you < q && q < claude && claude < an,
-        "out of order:\n{card}"
+        !card.contains("the caller checks it first."),
+        "the agent's reply must not be rendered in the diff:\n{card}"
     );
 }
 
 #[test]
 fn collapsing_a_thread_leaves_only_its_newest_turn() {
-    let mut a = app_with_notes(vec![conversation(
+    let mut a = app_with_notes(vec![conversation_with_followup(
         1,
         3,
         "why is this safe?",
         "the caller checks it first.",
+        "then drop the assert.",
     )]);
     // `z` on the card below the cursor.
     a.on_key(crossterm::event::KeyEvent::new(
@@ -434,15 +449,15 @@ fn collapsing_a_thread_leaves_only_its_newest_turn() {
     let card = body.join("\n");
 
     assert!(
-        card.contains("the caller checks it first."),
-        "the newest turn stays visible:\n{card}"
+        card.contains("then drop the assert."),
+        "your newest note stays visible:\n{card}"
     );
     assert!(
         !card.contains("why is this safe?"),
-        "the older turn is hidden:\n{card}"
+        "your older note is hidden:\n{card}"
     );
     assert!(
-        card.contains("1 earlier turn"),
+        card.contains("1 earlier note"),
         "and the card says what it hid:\n{card}"
     );
 }
@@ -546,7 +561,13 @@ fn focusing_one_of_two_threads_on_the_same_line_shows_that_thread() {
 /// outcome of the agent actually applying the fix.
 #[test]
 fn z_folds_a_whole_file_thread_even_though_its_card_is_above_the_cursor() {
-    let mut t = conversation(1, 0, "look at the whole file", "had a look.");
+    let mut t = conversation_with_followup(
+        1,
+        0,
+        "look at the whole file",
+        "had a look.",
+        "and again please.",
+    );
     t.anchor.start = 0;
     t.anchor.end = 0; // whole-file: card splices at doc line 0
     let mut a = app_with_notes(vec![t]);
@@ -560,7 +581,7 @@ fn z_folds_a_whole_file_thread_even_though_its_card_is_above_the_cursor() {
     let buf = draw(&mut a);
     let screen: String = (1..H - 1).map(|y| row(&buf, y)).collect();
     assert!(
-        screen.contains("1 earlier turn"),
+        screen.contains("1 earlier note"),
         "z did not fold the card above the cursor:\n{screen}"
     );
 }
