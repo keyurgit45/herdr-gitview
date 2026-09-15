@@ -130,9 +130,19 @@ pub struct PreviewApp {
     /// The file the current doc was built for (cursor-preservation check).
     shown_file: Option<PathBuf>,
     /// Rendered indices of injected note-card lines (excluded from ranges).
+    /// Always ascending — cards are spliced in anchor order — so every lookup
+    /// goes through `is_card_line`/`cards_before`, which binary-search it. A
+    /// linear scan was free for three-line notes and is not for a card that
+    /// can be a hundred lines of conversation.
     card_lines: Vec<usize>,
+    /// Threads the user has collapsed to their newest turn (`z`).
+    collapsed: std::collections::HashSet<u64>,
     /// The first doc line of each note's card, keyed by note id.
-    card_starts: Vec<(u64, usize)>,
+    /// `(thread id, first doc line, height)` for each card in the shown file.
+    /// The height is recorded here rather than re-derived from `card_lines`:
+    /// two cards on one anchor are spliced back-to-back, so their lines form
+    /// a single unbroken run that no walk can tell apart.
+    card_starts: Vec<(u64, usize, usize)>,
     /// Where the open composer box sits in the doc: `(first line, height)`.
     composer_span: Option<(usize, usize)>,
     /// Note id to scroll to once its file's diff arrives (notes view hover).
@@ -180,6 +190,7 @@ impl PreviewApp {
             saved_tint: Vec::new(),
             shown_file: None,
             card_lines: Vec::new(),
+            collapsed: std::collections::HashSet::new(),
             card_starts: Vec::new(),
             composer_span: None,
             pending_focus: None,
@@ -345,25 +356,44 @@ impl PreviewApp {
                 .filter(|t| t.anchor.file == req.file && Some(t.id) != editing)
                 .map(|t| {
                     let (anchor, lost) = card::anchor_of(built, t.anchor.end);
-                    let mut label = card::range_label("note", t.anchor.start, t.anchor.end);
+                    // Built as spans, not one string: the state badge carries
+                    // its own colour, and a narrow pane must drop the turn
+                    // count before it drops "anchor lost".
+                    let mut title = vec![Span::styled(
+                        format!(
+                            " {} ",
+                            card::range_label("note", t.anchor.start, t.anchor.end)
+                        ),
+                        card::title_style(),
+                    )];
                     if t.turns.len() > 1 {
-                        label.push_str(&format!(" · {} turns", t.turns.len()));
+                        title.push(Span::styled(
+                            format!("· {} turns ", t.turns.len()),
+                            card::dim_style(),
+                        ));
                     }
                     if t.state != crate::thread::ThreadState::Draft {
-                        label.push_str(&format!(" · {}", t.state.badge()));
+                        title.push(Span::styled(
+                            format!("· {} ", t.state.badge()),
+                            card::badge_style(t.state),
+                        ));
                     }
                     if lost {
                         // Its line is gone from this diff (the file changed
                         // under it). Say so rather than quietly rendering it
                         // at the top as if it were a whole-file note.
-                        label.push_str(" · anchor lost");
+                        title.push(Span::styled("· anchor lost ", Style::new().fg(Color::Red)));
                     }
                     Card {
                         anchor,
-                        // Phase C replaces this with a nested turn render;
-                        // until then the newest turn is what you see.
-                        lines: card::note_card(&label, t.preview(), width, self.cfg.theme),
-                        note: Some(t.id),
+                        lines: card::thread_card(
+                            title,
+                            t,
+                            width,
+                            self.cfg.theme,
+                            self.collapsed.contains(&t.id),
+                        ),
+                        kind: card::CardKind::Thread(t.id),
                     }
                 })
                 .collect();
@@ -389,7 +419,7 @@ impl PreviewApp {
                         width,
                         self.cfg.theme,
                     ),
-                    note: None,
+                    kind: card::CardKind::Composer,
                 }
             });
             if let Some(card) = composing {
@@ -428,9 +458,13 @@ impl PreviewApp {
             let mut shift = 0usize;
             for card in &cards {
                 let start = card.anchor + shift;
-                match card.note {
-                    Some(id) => self.card_starts.push((id, start)),
-                    None => self.composer_span = Some((start, card.lines.len())),
+                match card.kind {
+                    card::CardKind::Thread(id) => {
+                        self.card_starts.push((id, start, card.lines.len()))
+                    }
+                    card::CardKind::Composer => {
+                        self.composer_span = Some((start, card.lines.len()))
+                    }
                 }
                 self.card_lines.extend(start..start + card.lines.len());
                 shift += card.lines.len();
@@ -466,7 +500,7 @@ impl PreviewApp {
                 let row = self.scroll as usize + (y - 1) as usize;
                 let line = self.line_of_row(row);
                 // Cards count as their neighbors; clicks on them do nothing.
-                let card_free = !self.card_lines.contains(&line);
+                let card_free = !self.is_card_line(line);
                 let to_built = self.doc_to_built(line);
                 if let (Some(bl), Some(built)) = (to_built, self.built.as_mut())
                     && built.unfold_at(bl)
@@ -498,13 +532,23 @@ impl PreviewApp {
         }
     }
 
+    /// Is this doc line part of an injected card (and so not source)?
+    /// `card_lines` is ascending by construction, so this is a binary search.
+    fn is_card_line(&self, line: usize) -> bool {
+        self.card_lines.binary_search(&line).is_ok()
+    }
+
+    /// How many injected card lines sit strictly above `line`.
+    fn cards_before(&self, line: usize) -> usize {
+        self.card_lines.partition_point(|c| *c < line)
+    }
+
     /// Map a doc line index (with cards injected) back to the built index.
     fn doc_to_built(&self, line: usize) -> Option<usize> {
-        if self.card_lines.contains(&line) {
+        if self.is_card_line(line) {
             return None;
         }
-        let cards_before = self.card_lines.iter().filter(|c| **c < line).count();
-        Some(line - cards_before)
+        Some(line - self.cards_before(line))
     }
 
     // ---- scrolling --------------------------------------------------------
@@ -551,6 +595,20 @@ impl PreviewApp {
     /// The rendered row logical `line` starts on.
     fn row_of_line(&self, line: usize) -> usize {
         self.wrapped.line_to_row.get(line).copied().unwrap_or(0)
+    }
+
+    /// The inclusive rendered-row range a logical line occupies. One line is
+    /// several rows once it wraps, which is the difference between "this line
+    /// is on screen" and "this line's first row is on screen".
+    pub fn row_span_of_line(&self, line: usize) -> (usize, usize) {
+        let first = self.row_of_line(line);
+        let last = self
+            .wrapped
+            .line_to_row
+            .get(line + 1)
+            .map(|r| r.saturating_sub(1))
+            .unwrap_or_else(|| self.visible_row_count().saturating_sub(1));
+        (first, last.max(first))
     }
 
     /// The logical doc line rendered `row` belongs to (clamped to the last
@@ -611,6 +669,21 @@ impl PreviewApp {
         // Snapping away from the clamp edge keeps the cursor on screen.
         let dir = if clamped_row < cur_row { -1 } else { 1 };
         let clamped = self.snap_off_card(self.line_of_row(clamped_row), dir);
+        // A thread card can be taller than the whole pane. When the visible
+        // window is *entirely* card lines there is no annotatable line to
+        // clamp onto, and `snap_off_card` escapes the viewport — parking the
+        // cursor somewhere the user cannot see, in a pane that draws no
+        // cursor of its own. Leave it where it is: scrolling through a
+        // conversation is reading, not a cursor move. Three-line notes could
+        // never reach this, which is why it is new in Phase C.
+        // Test the whole row span, not just the first row: a wrapped line
+        // starts above the window while most of it is inside, and judging it
+        // by its first row alone would strand the cursor on any wrapped diff
+        // — notes or no notes.
+        let (first_row, last_row_of) = self.row_span_of_line(clamped);
+        if last_row_of < top || first_row > bottom {
+            return;
+        }
         if clamped != self.cursor_line {
             self.cursor_line = clamped;
             self.restyle();
@@ -667,6 +740,7 @@ impl PreviewApp {
                 }
             }
             Action::Annotate => self.begin_annotate(),
+            Action::ToggleThread => self.toggle_thread_at_cursor(),
             Action::NotesView => self.notes_view_request = true,
             // Enter: open the editor, same as Enter over in the list. The
             // list owns that flow (busy lockout, tab-nvim reuse), so just
@@ -735,11 +809,11 @@ impl PreviewApp {
     fn snap_off_card(&self, line: usize, dir: i32) -> usize {
         let last = self.content_lines().saturating_sub(1);
         let line = line.min(last);
-        if !self.card_lines.contains(&line) {
+        if !self.is_card_line(line) {
             return line;
         }
-        let forward = (line..=last).find(|i| !self.card_lines.contains(i));
-        let backward = (0..=line).rev().find(|i| !self.card_lines.contains(i));
+        let forward = (line..=last).find(|i| !self.is_card_line(*i));
+        let backward = (0..=line).rev().find(|i| !self.is_card_line(*i));
         let (first, second) = if dir < 0 {
             (backward, forward)
         } else {
@@ -813,8 +887,10 @@ impl PreviewApp {
             Some(_) => {
                 let (a, b) = self.selection();
                 // Cards inside the range stay untinted — they are not part of
-                // the selection and contribute nothing to the note.
-                for idx in (a..=b).filter(|i| !self.card_lines.contains(i)) {
+                // the selection and contribute nothing to the note. Collected
+                // first so the doc can be borrowed mutably below.
+                let rows: Vec<usize> = (a..=b).filter(|i| !self.is_card_line(*i)).collect();
+                for idx in rows {
                     tint(idx, select_bg, &mut saved, &mut self.doc.lines);
                 }
             }
@@ -1143,13 +1219,76 @@ impl PreviewApp {
     }
 
     fn scroll_to_note(&mut self, id: u64) {
-        let Some((_, line)) = self.card_starts.iter().find(|(n, _)| *n == id) else {
+        let Some((_, start, len)) = self.card_starts.iter().find(|(n, _, _)| *n == id) else {
             return; // not in the shown file, or its card is the open composer
         };
-        let row = self.row_of_line(*line);
-        self.scroll = row.saturating_sub(3) as u16;
+        let (start, len) = (*start, *len);
+        let vh = self.viewport_h.max(1) as usize;
+        // Two-sided, biased to the bottom: the newest turn is what you came
+        // to read, so when a conversation is taller than the pane the *end*
+        // of the card must be on screen, not three lines of its header.
+        let start_row = self.row_of_line(start).saturating_sub(3);
+        let last_line = (start + len)
+            .saturating_sub(1)
+            .min(self.content_lines().saturating_sub(1));
+        let end_row = self.row_of_line(last_line) + 1;
+        self.scroll = if end_row > start_row + vh {
+            end_row.saturating_sub(vh) as u16
+        } else {
+            start_row as u16
+        };
         self.clamp_scroll();
         self.keep_cursor_visible();
+    }
+
+    /// The thread whose card contains `line`, if any: the nearest card
+    /// starting at or above `line` whose recorded height still covers it.
+    fn thread_at_line(&self, line: usize) -> Option<u64> {
+        let (id, start, len) = self
+            .card_starts
+            .iter()
+            .filter(|(_, start, _)| *start <= line)
+            .max_by_key(|(_, start, _)| *start)?;
+        (line < start + len).then_some(*id)
+    }
+
+    /// `z`: collapse a long conversation to its newest turn, or expand it
+    /// again. The cursor can never rest *on* a card, so this falls back to the
+    /// nearest card below and then to the nearest above. The upward fallback
+    /// is not a nicety: a whole-file note — and every thread whose anchor was
+    /// lost when the agent rewrote the file — splices at doc line 0, with the
+    /// cursor parked permanently below it.
+    fn toggle_thread_at_cursor(&mut self) {
+        let id = self
+            .thread_at_line(self.cursor_line)
+            .or_else(|| self.nearest_card_below(self.cursor_line))
+            .or_else(|| self.nearest_card_above(self.cursor_line));
+        let Some(id) = id else {
+            self.flash("no thread here");
+            return;
+        };
+        if !self.collapsed.remove(&id) {
+            self.collapsed.insert(id);
+        }
+        self.rebuild();
+    }
+
+    /// The first thread card starting at or after `line`.
+    fn nearest_card_below(&self, line: usize) -> Option<u64> {
+        self.card_starts
+            .iter()
+            .filter(|(_, start, _)| *start >= line)
+            .min_by_key(|(_, start, _)| *start)
+            .map(|(id, _, _)| *id)
+    }
+
+    /// The last thread card starting before `line`.
+    fn nearest_card_above(&self, line: usize) -> Option<u64> {
+        self.card_starts
+            .iter()
+            .filter(|(_, start, _)| *start < line)
+            .max_by_key(|(_, start, _)| *start)
+            .map(|(id, _, _)| *id)
     }
 
     pub fn flash(&mut self, msg: impl Into<String>) {

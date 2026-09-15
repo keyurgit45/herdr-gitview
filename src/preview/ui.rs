@@ -185,6 +185,15 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &PreviewApp) {
     if unsent > 0 {
         pairs.push((hint(Action::SendNotes), format!("send ({unsent})")));
     }
+    // Only worth advertising where there is a card to fold.
+    let has_card = app
+        .current
+        .as_ref()
+        .map(|r| app.store.threads.iter().any(|t| t.anchor.file == r.file))
+        .unwrap_or(false);
+    if has_diff && has_card {
+        pairs.push((hint(Action::ToggleThread), "fold".to_string()));
+    }
     if has_diff {
         pairs.push((
             format!("{}/{}", hint(Action::DiffTop), hint(Action::DiffBottom)),

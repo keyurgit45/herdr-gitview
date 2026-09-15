@@ -56,8 +56,17 @@ theme = "dark"
 # toggle_scope = "w"        # worktree <-> branch
 # toggle_cached = "tab"     # unstaged <-> staged diff view
 # stage = "s"
+# unstage = "u"
 # discard = "x"
 # commit = "c"
+# log = "l"                 # commit history
+# Review threads:
+# select = "v"              # start/extend a line selection in the diff
+# annotate = "a"            # open a thread on the selection (or whole file)
+# send_notes = "p"          # send everything unsent to an agent pane
+# notes_view = "n"          # list every thread in the repo
+# delete = "d"              # delete the selected thread (notes view)
+# toggle_thread = "z"       # collapse/expand a thread card in the diff
 # refresh = "r"
 # help = "?"
 # quit = "q"                # also: esc

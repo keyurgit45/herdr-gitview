@@ -34,6 +34,8 @@ pub enum Action {
     NotesView,
     /// Delete the selected item (notes view).
     Delete,
+    /// Collapse/expand the thread card under the cursor (preview pane).
+    ToggleThread,
     Refresh,
     Help,
     Quit,
@@ -67,6 +69,7 @@ pub const DEFAULT_KEYS: &[(Action, &str, &[&str])] = &[
     (Action::SendNotes, "send_notes", &["p"]),
     (Action::NotesView, "notes_view", &["n"]),
     (Action::Delete, "delete", &["d"]),
+    (Action::ToggleThread, "toggle_thread", &["z"]),
     (Action::Refresh, "refresh", &["r"]),
     (Action::Help, "help", &["?"]),
     (Action::Quit, "quit", &["q", "esc"]),
@@ -269,7 +272,13 @@ mod tests {
             km.action(&ev(KeyCode::Esc, KeyModifiers::NONE)),
             Some(Action::Quit)
         );
-        assert_eq!(km.action(&ev(KeyCode::Char('z'), KeyModifiers::NONE)), None);
+        assert_eq!(
+            km.action(&ev(KeyCode::Char('z'), KeyModifiers::NONE)),
+            Some(Action::ToggleThread)
+        );
+        // `y` stands in for "any key nobody bound": it must resolve to
+        // nothing rather than to whatever action was added most recently.
+        assert_eq!(km.action(&ev(KeyCode::Char('y'), KeyModifiers::NONE)), None);
     }
 
     #[test]

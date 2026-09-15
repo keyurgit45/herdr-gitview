@@ -15,13 +15,24 @@ use crate::textarea::TextArea;
 /// draw has reported the real pane width.
 pub const MIN_WIDTH: u16 = 24;
 
-/// One block spliced into the diff: a saved note's card, or the composer.
+/// What a spliced block is. An enum rather than `Option<u64>`: once the
+/// composer can be nested inside a thread it also has a thread id, and an
+/// `Option` would quietly classify it as a thread card and leave
+/// `composer_span` unset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardKind {
+    /// A saved thread's card.
+    Thread(u64),
+    /// The standalone composer box.
+    Composer,
+}
+
+/// One block spliced into the diff: a thread's card, or the composer.
 pub struct Card {
     /// Doc line (pre-splice) the block is inserted at.
     pub anchor: usize,
     pub lines: Vec<Line<'static>>,
-    /// The note this card shows; `None` for the composer.
-    pub note: Option<u64>,
+    pub kind: CardKind,
 }
 
 /// Where a note anchors in the built diff, and whether its line is gone.
@@ -35,6 +46,30 @@ pub fn anchor_of(built: &super::render::DiffDoc, end: u32) -> (usize, bool) {
         Some(line) => (line + 1, false),
         None => (0, true),
     }
+}
+
+/// Styles for the pieces of a card title, so the badge does not inherit the
+/// title colour. Every span handed to `card_box_titled` MUST carry a
+/// non-default style: the body loop rewrites default-styled spans to the body
+/// colour, silently flattening anything that forgot.
+pub fn title_style() -> Style {
+    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+}
+
+pub fn badge_style(state: crate::thread::ThreadState) -> Style {
+    use crate::thread::ThreadState as S;
+    let c = match state {
+        S::Draft => Color::Gray,
+        S::Sent => Color::Cyan,
+        S::Answered => Color::Green,
+        S::Failed => Color::Red,
+        S::Resolved => Color::DarkGray,
+    };
+    Style::new().fg(c)
+}
+
+pub fn dim_style() -> Style {
+    Style::new().add_modifier(Modifier::DIM)
 }
 
 /// `<prefix> · line 12` / `· lines 12-20` / `· whole file`.
@@ -63,29 +98,89 @@ pub fn accent_gutter(lines: &mut [Line<'static>], idx: usize, built: &super::ren
     }
 }
 
-/// One review note as a boxed block of display lines, spliced into the diff
-/// under the line it comments on:
+/// Who said a turn, as it is labelled inside the card. The agent's own name
+/// is used when we know it, so a card reads "claude:" rather than "agent:".
+fn role_label(turn: &crate::thread::Turn, agent: Option<&str>) -> (String, Style) {
+    use crate::thread::Author;
+    match turn.author {
+        Author::Human => ("you".to_string(), Style::new().fg(Color::Yellow)),
+        Author::Agent => (
+            agent.unwrap_or("agent").to_string(),
+            Style::new().fg(Color::Green),
+        ),
+        Author::System => ("system".to_string(), Style::new().fg(Color::Red)),
+    }
+}
+
+/// A whole conversation as one boxed block:
 ///
 /// ```text
-///   ╭─ note · lines 12-20 ────────────╮
-///   │ the note text, wrapped to fit   │
-///   ╰─────────────────────────────────╯
+///   ╭─ note · lines 12-20 · 2 turns · replied ──╮
+///   │ you                                       │
+///   │   why is this unwrap safe?                │
+///   │                                           │
+///   │ claude                                    │
+///   │   the caller guarantees the key exists.   │
+///   ╰───────────────────────────────────────────╯
 /// ```
 ///
-/// Indented so it reads as a comment *on* the code rather than another diff
-/// row, and boxed so a multi-line note stays visually one note.
-pub fn note_card(
-    label: &str,
-    text: &str,
+/// Collapsed, it shows only the newest turn plus a count of what is hidden —
+/// a long conversation must not push the code it is about off the screen.
+pub fn thread_card(
+    title: Vec<Span<'static>>,
+    thread: &crate::thread::Thread,
     width: usize,
     theme: crate::config::Theme,
+    collapsed: bool,
 ) -> Vec<Line<'static>> {
-    let rows: Vec<Vec<Span<'static>>> = text
-        .split('\n')
-        .flat_map(|logical| crate::textarea::wrap_plain(logical, card_text_width(width)))
-        .map(|piece| vec![Span::raw(piece)])
-        .collect();
-    card_box(label, rows, width, theme, false)
+    let text_w = card_text_width(width);
+    let agent = thread.agent.as_ref().map(|a| a.agent.as_str());
+
+    let shown: Vec<&crate::thread::Turn> = if collapsed {
+        thread.turns.iter().rev().take(1).collect()
+    } else {
+        thread.turns.iter().collect()
+    };
+    let hidden = thread.turns.len() - shown.len();
+
+    // A conversation needs to say who is speaking; a lone unsent note does
+    // not — labelling it "you" is noise, and costs the card a line on by far
+    // the most common case. Turn text is then indented under its role so the
+    // roles form a column you can scan without reading the prose.
+    let voiced = thread.turns.len() > 1;
+    let body_w = if voiced {
+        text_w.saturating_sub(2).max(1)
+    } else {
+        text_w
+    };
+
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    if hidden > 0 {
+        rows.push(vec![Span::styled(
+            format!(
+                "… {hidden} earlier turn{}",
+                if hidden == 1 { "" } else { "s" }
+            ),
+            dim_style(),
+        )]);
+    }
+    for (i, turn) in shown.iter().enumerate() {
+        // A blank line between turns, never before the first one.
+        if i > 0 || hidden > 0 {
+            rows.push(vec![Span::raw(String::new())]);
+        }
+        if voiced {
+            let (role, style) = role_label(turn, agent);
+            rows.push(vec![Span::styled(role, style)]);
+        }
+        for logical in turn.text.split('\n') {
+            for piece in crate::textarea::wrap_plain(logical, body_w) {
+                let row = if voiced { format!("  {piece}") } else { piece };
+                rows.push(vec![Span::raw(row)]);
+            }
+        }
+    }
+    card_box_titled(title, rows, width, theme, false)
 }
 
 /// The text width inside a card box at pane `width`: the indent, the two
@@ -163,9 +258,69 @@ pub fn composer_card(
     card_box(label, body, width, theme, true)
 }
 
-/// Draw a titled box around pre-wrapped rows of spans.
+/// Fit a multi-span title into `avail` columns.
+///
+/// `spans[0]` is the range label; everything after it is a suffix badge, in
+/// increasing order of importance ("· 2 turns", then the state, then
+/// "· anchor lost"). A narrow pane elides the *label* and drops the least
+/// important badges, rather than truncating the tail — a card whose anchor is
+/// gone has to be able to say so at 60 columns, which is the width the
+/// scenario tests run at.
+fn elide_title(mut spans: Vec<Span<'static>>, avail: usize) -> Vec<Span<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    /// Wide enough for "note · lines 120-140 ". Below this the label starts
+    /// losing its line numbers, which is what identifies the thread — and
+    /// which nothing else on the card can tell you once the anchor is lost.
+    /// A badge is dropped instead.
+    const MIN_LABEL: usize = 21;
+
+    let total = |s: &[Span<'static>]| -> usize { s.iter().map(|x| x.content.width()).sum() };
+    if spans.is_empty() || total(&spans) <= avail {
+        return spans;
+    }
+    while spans.len() > 1 {
+        let suffixes = total(&spans) - spans[0].content.width();
+        // Stop as soon as the label has room, OR as soon as everything fits
+        // outright — testing only the MIN_LABEL floor kept dropping badges
+        // that would have fitted once an earlier one was gone.
+        if total(&spans) <= avail || avail.saturating_sub(suffixes) >= MIN_LABEL {
+            break;
+        }
+        spans.remove(1); // least important badge still present
+    }
+    let suffixes = total(&spans) - spans[0].content.width();
+    let room = avail.saturating_sub(suffixes);
+    let head = crate::textarea::elide_tail(&spans[0].content, room);
+    spans[0] = Span::styled(head, spans[0].style);
+    spans
+}
+
+/// Draw a box titled with a single elided string.
 fn card_box(
     label: &str,
+    rows: Vec<Vec<Span<'static>>>,
+    width: usize,
+    theme: crate::config::Theme,
+    accent: bool,
+) -> Vec<Line<'static>> {
+    let box_w = card_box_width(width);
+    let label = format!(" {label} ");
+    let label = crate::textarea::elide_tail(&label, box_w.saturating_sub(3));
+    card_box_titled(
+        vec![Span::styled(label, title_style())],
+        rows,
+        width,
+        theme,
+        accent,
+    )
+}
+
+/// Draw a titled box around pre-wrapped rows of spans, where the title is
+/// itself a span list. `fill` is computed from the summed span widths, so a
+/// multi-coloured title (label + turn count + state badge) still closes its
+/// border in the right column.
+pub fn card_box_titled(
+    title: Vec<Span<'static>>,
     rows: Vec<Vec<Span<'static>>>,
     width: usize,
     theme: crate::config::Theme,
@@ -183,7 +338,6 @@ fn card_box(
     } else {
         Color::Rgb(0x6c, 0x70, 0x86)
     });
-    let title = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     let body = Style::new().fg(if theme.is_light() {
         Color::Rgb(0x4c, 0x4f, 0x69)
     } else {
@@ -191,15 +345,17 @@ fn card_box(
     });
     let pad = || Span::raw(" ".repeat(INDENT));
 
-    let label = format!(" {label} ");
-    let label = crate::textarea::elide_tail(&label, box_w.saturating_sub(3));
-    let fill = box_w.saturating_sub(3 + label.width());
-    let mut lines = vec![Line::from(vec![
-        pad(),
-        Span::styled("╭─", border),
-        Span::styled(label, title),
-        Span::styled(format!("{}╮", "─".repeat(fill)), border),
-    ])];
+    // Elide across the span list rather than per span, so a long label cannot
+    // push the state badge out of the title: the badge is the part that says
+    // whether the agent has the ball, so it is the last thing to drop.
+    let avail = box_w.saturating_sub(3);
+    let title = elide_title(title, avail);
+    let used: usize = title.iter().map(|s| s.content.width()).sum();
+    let fill = avail.saturating_sub(used);
+    let mut head = vec![pad(), Span::styled("╭─", border)];
+    head.extend(title);
+    head.push(Span::styled(format!("{}╮", "─".repeat(fill)), border));
+    let mut lines = vec![Line::from(head)];
 
     // An empty note still gets one body row, so the box never collapses.
     let rows = if rows.is_empty() {

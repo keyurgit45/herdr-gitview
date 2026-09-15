@@ -80,10 +80,20 @@ fn empty_diff() -> render::DiffDoc {
 }
 
 fn draw(app: &mut PreviewApp) -> Buffer {
-    let backend = TestBackend::new(W, H);
+    draw_at(app, W, H)
+}
+
+/// Render at an explicit size — card titles have to survive panes narrower
+/// than the 60 columns the rest of these tests use.
+fn draw_at(app: &mut PreviewApp, w: u16, h: u16) -> Buffer {
+    let backend = TestBackend::new(w, h);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| ui::render(frame, app)).unwrap();
     terminal.backend().buffer().clone()
+}
+
+fn row_at(buf: &Buffer, y: u16, w: u16) -> String {
+    (0..w).map(|x| buf[(x, y)].symbol()).collect()
 }
 
 fn row(buf: &Buffer, y: u16) -> String {
@@ -320,6 +330,19 @@ fn note(id: u64, start: u32, end: u32, text: &str) -> herdr_gitview::thread::Thr
     )
 }
 
+/// A thread that has been sent and answered, so it renders as a conversation.
+fn conversation(id: u64, line: u32, question: &str, answer: &str) -> herdr_gitview::thread::Thread {
+    let mut t = note(id, line, line, question);
+    t.mark_sent(herdr_gitview::thread::AgentRef {
+        pane: "w1:p1".into(),
+        agent: "claude".into(),
+        session: None,
+        session_kind: None,
+    });
+    t.push(herdr_gitview::thread::Author::Agent, answer.to_string());
+    t
+}
+
 /// A diff with `n` inserted lines plus the given notes, rendered once.
 fn app_with_notes(notes: Vec<herdr_gitview::thread::Thread>) -> PreviewApp {
     let mut a = app();
@@ -362,6 +385,256 @@ fn a_note_renders_as_a_boxed_card_under_its_line() {
         body[top - 1].contains("line 2"),
         "anchor: {:?}",
         body[top - 1]
+    );
+}
+
+#[test]
+fn a_conversation_renders_each_turn_under_its_speaker() {
+    let mut a = app_with_notes(vec![conversation(
+        1,
+        3,
+        "why is this safe?",
+        "the caller checks it first.",
+    )]);
+    let buf = draw(&mut a);
+    let body: Vec<String> = (1..H - 1).map(|y| row(&buf, y)).collect();
+    let top = body.iter().position(|l| l.contains('╭')).expect("no card");
+
+    // Title carries the turn count and the state badge.
+    assert!(body[top].contains("2 turns"), "title: {:?}", body[top]);
+    assert!(body[top].contains("replied"), "title: {:?}", body[top]);
+
+    // Both turns are present, each under its own speaker, in order.
+    let card = body[top..].join("\n");
+    let you = card.find("you").expect("no human role label");
+    let q = card.find("why is this safe?").expect("no question");
+    let claude = card.find("claude").expect("agent named by its own name");
+    let an = card.find("the caller checks it first.").expect("no answer");
+    assert!(
+        you < q && q < claude && claude < an,
+        "out of order:\n{card}"
+    );
+}
+
+#[test]
+fn collapsing_a_thread_leaves_only_its_newest_turn() {
+    let mut a = app_with_notes(vec![conversation(
+        1,
+        3,
+        "why is this safe?",
+        "the caller checks it first.",
+    )]);
+    // `z` on the card below the cursor.
+    a.on_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('z'),
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    let buf = draw(&mut a);
+    let body: Vec<String> = (1..H - 1).map(|y| row(&buf, y)).collect();
+    let card = body.join("\n");
+
+    assert!(
+        card.contains("the caller checks it first."),
+        "the newest turn stays visible:\n{card}"
+    );
+    assert!(
+        !card.contains("why is this safe?"),
+        "the older turn is hidden:\n{card}"
+    );
+    assert!(
+        card.contains("1 earlier turn"),
+        "and the card says what it hid:\n{card}"
+    );
+}
+
+/// Regression: a thread card can be taller than the whole pane. Scrolling
+/// into its middle leaves a viewport made *entirely* of card lines, and
+/// `keep_cursor_visible` then had nothing to clamp onto — it snapped the
+/// cursor clear of the card and parked it off-screen, in a pane that draws no
+/// cursor of its own. Three-line notes could never reach this.
+#[test]
+fn scrolling_inside_a_tall_thread_does_not_fling_the_cursor_off_screen() {
+    let mut t = conversation(1, 3, "opening question", "first answer");
+    for i in 0..8 {
+        t.push(
+            herdr_gitview::thread::Author::Human,
+            format!("follow up {i}"),
+        );
+        t.push(herdr_gitview::thread::Author::Agent, format!("answer {i}"));
+    }
+    let mut a = app_with_notes(vec![t]);
+    draw(&mut a);
+
+    let body_h = a.viewport_h as usize;
+    let before = a.cursor_line;
+    // Scroll so the visible window is entirely inside the card's interior.
+    a.scroll_by(5);
+    draw(&mut a);
+
+    let top = a.scroll as usize;
+    let visible = top..top + body_h;
+    assert!(
+        a.cursor_line == before || visible.contains(&a.cursor_line),
+        "cursor flung to {} from {}, window {:?}",
+        a.cursor_line,
+        before,
+        visible
+    );
+}
+
+/// The title has to fit a 60-column pane once it carries a turn count, a
+/// state badge and possibly "anchor lost". Eliding the tail would drop
+/// exactly the part that says the thread no longer points at real code, so
+/// the least important badge goes first and the range label shrinks.
+#[test]
+fn a_narrow_card_drops_the_turn_count_before_the_anchor_warning() {
+    // `end` is past the end of the diff, so the anchor cannot be found.
+    let mut t = conversation(1, 3, "why is this safe?", "the caller checks.");
+    t.anchor.start = 12;
+    t.anchor.end = 99;
+    let mut a = app_with_notes(vec![t]);
+    let buf = draw(&mut a);
+    let body: Vec<String> = (1..H - 1).map(|y| row(&buf, y)).collect();
+    let title = body
+        .iter()
+        .find(|l| l.contains('╭'))
+        .expect("no card")
+        .clone();
+
+    assert!(
+        title.contains("anchor lost"),
+        "the anchor warning must survive a narrow pane: {title:?}"
+    );
+    assert!(
+        title.contains("replied"),
+        "so must the state badge: {title:?}"
+    );
+    assert!(
+        !title.contains("2 turns"),
+        "the turn count is what gives way: {title:?}"
+    );
+}
+
+/// Regression: two threads on one anchor are spliced back-to-back, so their
+/// doc lines form a single unbroken run. Deriving a card's height by walking
+/// that run merged them, and focusing the first scrolled to the end of the
+/// second. Two whole-file notes, or any two anchor-lost threads, both land on
+/// anchor 0 — so this is reachable without ever putting two notes on one line.
+#[test]
+fn focusing_one_of_two_threads_on_the_same_line_shows_that_thread() {
+    let short = note(1, 3, 3, "FIRSTCARD");
+    let mut long = conversation(2, 3, "why?", "because.");
+    for i in 0..6 {
+        long.push(herdr_gitview::thread::Author::Human, format!("more {i}"));
+        long.push(herdr_gitview::thread::Author::Agent, format!("reply {i}"));
+    }
+    let mut a = app_with_notes(vec![short, long]);
+    draw(&mut a);
+
+    a.focus_note(1);
+    let buf = draw(&mut a);
+    let screen: String = (1..H - 1).map(|y| row(&buf, y)).collect();
+    assert!(
+        screen.contains("FIRSTCARD"),
+        "focusing thread 1 scrolled somewhere else entirely:\n{screen}"
+    );
+}
+
+/// Regression: a whole-file note's card is spliced at doc line 0, so the
+/// cursor is always *below* it and a downward-only search could never find
+/// it. Same for every thread whose anchor was lost — which is the normal
+/// outcome of the agent actually applying the fix.
+#[test]
+fn z_folds_a_whole_file_thread_even_though_its_card_is_above_the_cursor() {
+    let mut t = conversation(1, 0, "look at the whole file", "had a look.");
+    t.anchor.start = 0;
+    t.anchor.end = 0; // whole-file: card splices at doc line 0
+    let mut a = app_with_notes(vec![t]);
+    draw(&mut a);
+    assert!(a.cursor_line > 0, "cursor sits below the card");
+
+    a.on_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('z'),
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    let buf = draw(&mut a);
+    let screen: String = (1..H - 1).map(|y| row(&buf, y)).collect();
+    assert!(
+        screen.contains("1 earlier turn"),
+        "z did not fold the card above the cursor:\n{screen}"
+    );
+}
+
+/// Regression: the title dropped badges by testing only the label's minimum
+/// width, so it kept discarding them after everything already fitted. The
+/// state badge went first, leaving a card that no longer said whether the
+/// agent had replied.
+#[test]
+fn a_title_keeps_every_badge_that_still_fits() {
+    // 56 columns: dropping the turn count alone makes the whole title fit,
+    // but the label is still shorter than the MIN_LABEL floor — so a loop
+    // that only consults that floor carries on and discards "replied" too.
+    const NARROW: u16 = 56;
+    let mut t = conversation(1, 5, "why?", "because.");
+    t.anchor.start = 5;
+    t.anchor.end = 99; // past the diff: adds the "anchor lost" badge
+    let mut a = app_with_notes(vec![t]);
+    let buf = draw_at(&mut a, NARROW, H);
+    let title = (1..H - 1)
+        .map(|y| row_at(&buf, y, NARROW))
+        .find(|l| l.contains('╭'))
+        .expect("no card");
+    assert!(
+        title.contains("anchor lost"),
+        "the anchor warning must survive: {title:?}"
+    );
+    assert!(
+        title.contains("replied"),
+        "the state badge still fits here and must be kept: {title:?}"
+    );
+}
+
+/// Regression: the tall-card guard judged a line by its *first* rendered row.
+/// A wrapped line starts above the window while most of it is on screen, so
+/// the guard bailed and left the cursor stranded — on any wrapped diff, with
+/// no notes involved at all.
+#[test]
+fn scrolling_a_wrapped_diff_with_no_notes_still_drags_the_cursor_along() {
+    let mut a = app();
+    let r = req("x.rs");
+    a.begin_show(r.clone());
+    // Lines far wider than the pane, so each wraps to several rows.
+    let hl = Highlighter::new(herdr_gitview::config::Theme::Dark);
+    let new: String = (0..40)
+        .map(|i| format!("line {i} {}\n", "x".repeat(200)))
+        .collect();
+    a.apply_diff(
+        &r,
+        Ok(render::build(
+            &PathBuf::from("x.rs"),
+            "",
+            &new,
+            &hl,
+            herdr_gitview::config::Theme::Dark,
+            3,
+            4,
+        )),
+    );
+    draw(&mut a);
+
+    a.scroll_by(6);
+    draw(&mut a);
+    let top = a.scroll as usize;
+    let bottom = top + a.viewport_h as usize;
+    let (first, last) = a.row_span_of_line(a.cursor_line);
+    assert!(
+        last >= top && first < bottom,
+        "cursor line {} occupies rows {}..={}, window {}..{}",
+        a.cursor_line,
+        first,
+        last,
+        top,
+        bottom
     );
 }
 

@@ -31,6 +31,7 @@ const HELP_ACTIONS: &[(Action, &str)] = &[
     (Action::Annotate, "add review note"),
     (Action::SendNotes, "send notes to an agent"),
     (Action::Select, "select lines (preview)"),
+    (Action::ToggleThread, "collapse / expand a thread (preview)"),
     (Action::ScrollDown, "scroll diff down"),
     (Action::ScrollUp, "scroll diff up"),
     (Action::HalfPageDown, "half page down"),

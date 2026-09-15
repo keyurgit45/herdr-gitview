@@ -316,6 +316,9 @@ impl App {
             Action::Log => self.toggle_log(),
             Action::NotesView => self.toggle_notes_view(),
             Action::Select => {}
+            // Collapsing a thread card acts on the card in the diff, which
+            // only the preview pane draws. Nothing to do on this side.
+            Action::ToggleThread => {}
             Action::Delete => {
                 if self.mode == Mode::Notes {
                     self.delete_note_request = self.selected_note().map(|n| n.id);
