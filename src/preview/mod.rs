@@ -8,6 +8,7 @@ pub mod compose;
 pub mod editor;
 pub mod highlight;
 pub mod render;
+pub mod reply;
 pub mod session;
 pub mod ui;
 

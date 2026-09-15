@@ -47,6 +47,8 @@ pub enum Event {
         req: ShowReq,
         result: Result<render::DiffDoc, String>,
     },
+    /// The reply worker made progress on a thread's turn.
+    Reply(super::reply::ReplyMsg),
 }
 
 pub struct Session {
@@ -54,6 +56,9 @@ pub struct Session {
     pub env: HostEnv,
     tx: Sender<Event>,
     work_tx: Sender<ShowReq>,
+    /// Requests to the reply worker. Off the UI thread because
+    /// `agent prompt --wait` blocks for as long as the agent thinks.
+    reply_tx: Sender<super::reply::ReplyReq>,
     conn: Option<Conn>,
     popups: Popups<PreviewPopup>,
     last_notes_rev: u64,
@@ -70,11 +75,13 @@ impl Session {
             },
             app.cfg.clone(),
         );
+        let reply_tx = super::reply::spawn_reply_worker(tx.clone(), env.herdr_bin.clone());
         Session {
             app,
             env,
             tx,
             work_tx,
+            reply_tx,
             conn: None,
             popups: Popups::default(),
             last_notes_rev: 0,
@@ -143,6 +150,62 @@ impl Session {
                 self.app.should_quit = true;
             }
             Event::Diff { req, result } => self.app.apply_diff(&req, result),
+            Event::Reply(msg) => self.on_reply(msg),
+        }
+    }
+
+    /// Queue one request per unsent thread. One thread per turn: a batch
+    /// would get back a single reply with no honest way to say which question
+    /// it answered.
+    fn dispatch(&mut self, pane: &str) {
+        let pending: Vec<(u64, String)> = self
+            .app
+            .store
+            .threads
+            .iter()
+            .filter(|t| t.has_unsent())
+            .map(|t| (t.id, super::reply::compose_prompt(t)))
+            .collect();
+        if pending.is_empty() {
+            self.app.flash("nothing unsent");
+            return;
+        }
+        let n = pending.len();
+        for (id, prompt) in pending {
+            let req = super::reply::ReplyReq {
+                pane: pane.to_string(),
+                id,
+                prompt,
+                timeout_ms: super::reply::DEFAULT_TIMEOUT_MS,
+            };
+            if self.reply_tx.send(req).is_err() {
+                self.app
+                    .flash("the reply worker is gone — restart the view");
+                return;
+            }
+        }
+        self.app.flash(format!(
+            "asking {pane} about {n} thread{}…",
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+
+    fn on_reply(&mut self, msg: super::reply::ReplyMsg) {
+        use super::reply::ReplyMsg as M;
+        match msg {
+            M::Delivered { id, agent } => self.app.mark_thread_sent(id, &agent),
+            M::Replied { id, text } => {
+                self.app.append_reply(id, text);
+                self.app.flash(format!("thread {id} answered"));
+            }
+            M::Failed { id, err, delivered } => {
+                // A failed send must leave a durable mark, not just a flash
+                // that ages out in three seconds: the thread is otherwise
+                // stranded in `Sent` with no way to tell it apart from one
+                // the agent is still thinking about.
+                self.app.mark_thread_failed(id, &err, delivered);
+                self.app.flash(format!("thread {id}: {err}"));
+            }
         }
     }
 
@@ -297,22 +360,11 @@ impl Session {
                 if answer != "cancel"
                     && let Some((pane, mode)) = answer.split_once('\t')
                 {
-                    match self.deliver_notes(pane, mode == "submit") {
-                        // The threads are NOT cleared: they stay in the store
-                        // so the agent's reply has somewhere to land. What
-                        // changes is that their Human turns are now `sent`,
-                        // which is what keeps a second send from re-delivering
-                        // the whole review.
-                        Ok((agent, n)) => {
-                            // Flash first: `mark_unsent_delivered` persists, and
-                            // a save failure there must not be papered over by
-                            // the success message.
-                            self.app
-                                .flash(format!("{n} turn(s) sent to {}", agent.agent));
-                            self.app.mark_unsent_delivered(&agent);
-                        }
-                        Err(err) => self.app.flash(format!("send failed: {err}")),
-                    }
+                    // `mode` came from the picker; the agent surface decides
+                    // for itself whether the agent can be prompted, so there
+                    // is no longer a separate "submit" keystroke to send.
+                    let _ = mode;
+                    self.dispatch(pane);
                 }
             }
             Some((PreviewPopup::PickAgent, Answer::Dead)) | None => {}
@@ -395,80 +447,6 @@ impl Session {
             .output()
             .map(|out| out.status.success() && !out.stdout.is_empty())
             .unwrap_or(false)
-    }
-
-    /// Compose the *unsent* turns and type them into the agent pane's input
-    /// (submit optionally presses enter). Returns who it went to and how many
-    /// turns went.
-    ///
-    /// Only unsent Human turns are included. Sending the whole store would
-    /// re-deliver every answered conversation on each press, which is what
-    /// made clearing-on-send necessary in the first place.
-    ///
-    /// Still the raw `pane send-text` surface: moving to `agent prompt`
-    /// belongs with the reply worker (item 3), because `--wait` blocks and
-    /// this runs on the UI thread.
-    fn deliver_notes(&self, pane: &str, submit: bool) -> Result<(crate::thread::AgentRef, usize)> {
-        let mut msg = String::new();
-        let mut sent = 0usize;
-        for thread in self.app.store.threads.iter().filter(|t| t.has_unsent()) {
-            let anchor = &thread.anchor;
-            for turn in thread.unsent() {
-                // Multi-line notes keep their line breaks, but continuation
-                // lines are indented so the anchor stays readable in the batch.
-                let text = indent_continuations(&turn.text);
-                if anchor.end == 0 {
-                    msg.push_str(&format!("{} — {text}\n", anchor.file.display()));
-                } else {
-                    msg.push_str(&format!(
-                        "{}:{}-{} — {text}\n",
-                        anchor.file.display(),
-                        anchor.start,
-                        anchor.end,
-                    ));
-                }
-                sent += 1;
-            }
-            if !anchor.snippet.is_empty() {
-                msg.push_str("```diff\n");
-                msg.push_str(&anchor.snippet);
-                msg.push_str("```\n");
-            }
-        }
-        if sent == 0 {
-            anyhow::bail!("nothing unsent");
-        }
-
-        let out = std::process::Command::new(&self.env.herdr_bin)
-            .args(["pane", "send-text", pane, &msg])
-            .output()?;
-        if !out.status.success() {
-            anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
-        }
-        if submit {
-            let _ = std::process::Command::new(&self.env.herdr_bin)
-                .args(["pane", "send-keys", pane, "enter"])
-                .output();
-        }
-        // Key the thread on the agent's *session*, not the pane: `pane move`
-        // reassigns pane ids and an exiting agent clears its name, so a
-        // pane-keyed thread silently rebinds to whoever lands there next.
-        let found = crate::popup::workspace_agents()
-            .into_iter()
-            .find(|(id, _, _, _, _)| id == pane);
-        Ok((
-            crate::thread::AgentRef {
-                pane: pane.to_string(),
-                agent: found
-                    .map(|(_, name, _, _, _)| name)
-                    .unwrap_or_else(|| pane.to_string()),
-                session: crate::agentio::agent_get(&self.env.herdr_bin, pane)
-                    .ok()
-                    .and_then(|i| i.session.map(|s| s.value)),
-                session_kind: Some("id".to_string()),
-            },
-            sent,
-        ))
     }
 
     /// Best-effort send to the list; a broken pipe just drops the link.
@@ -572,40 +550,5 @@ fn fetch_contents(
             let new = repo.file_in_worktree(path).unwrap_or_default();
             Ok((old, new))
         }
-    }
-}
-
-/// Keep a note's line breaks but indent everything after the first line, so
-/// the `file:12-20 — …` anchor still reads as the start of one note.
-fn indent_continuations(text: &str) -> String {
-    let mut lines = text.lines();
-    let mut out = lines.next().unwrap_or_default().to_string();
-    for line in lines {
-        out.push_str("\n  ");
-        out.push_str(line);
-    }
-    out
-}
-
-#[cfg(test)]
-mod note_format_tests {
-    use super::indent_continuations;
-
-    #[test]
-    fn a_single_line_note_is_unchanged() {
-        assert_eq!(indent_continuations("one line"), "one line");
-    }
-
-    #[test]
-    fn continuation_lines_are_indented_under_the_anchor() {
-        assert_eq!(
-            indent_continuations("first\nsecond\nthird"),
-            "first\n  second\n  third"
-        );
-    }
-
-    #[test]
-    fn an_empty_note_stays_empty() {
-        assert_eq!(indent_continuations(""), "");
     }
 }

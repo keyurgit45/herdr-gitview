@@ -1254,6 +1254,94 @@ fn a_note_whose_line_is_gone_says_so_instead_of_posing_as_a_file_note() {
 /// The headline claim of the threads fork: a conversation outlives the pane.
 /// Closing gitview and reopening it must bring the review back, ids intact.
 #[test]
+fn sending_marks_only_the_thread_that_was_actually_asked() {
+    use herdr_gitview::thread::ThreadState;
+    let mut a = app_with_notes(vec![note(1, 2, 2, "first"), note(2, 5, 5, "second")]);
+    let agent = herdr_gitview::thread::AgentRef {
+        pane: "w1:p1".into(),
+        agent: "claude".into(),
+        session: None,
+        session_kind: None,
+    };
+    a.mark_thread_sent(1, &agent);
+
+    assert_eq!(a.threads()[0].state, ThreadState::Sent);
+    assert!(!a.threads()[0].has_unsent());
+    assert_eq!(
+        a.threads()[1].state,
+        ThreadState::Draft,
+        "thread 2 was never asked — one turn succeeding says nothing about another"
+    );
+    assert!(a.threads()[1].has_unsent());
+}
+
+/// A failure that provably never reached the agent must not touch the `sent`
+/// marks: the thread was never moved to Sent, and clearing them would also
+/// unmark turns an *earlier*, successful send delivered — re-asking them.
+#[test]
+fn an_undelivered_failure_leaves_earlier_delivered_turns_alone() {
+    use herdr_gitview::thread::{Author, ThreadState};
+    let mut a = app_with_notes(vec![note(1, 2, 2, "first question")]);
+    let agent = herdr_gitview::thread::AgentRef {
+        pane: "w1:p1".into(),
+        agent: "claude".into(),
+        session: None,
+        session_kind: None,
+    };
+    // Round one succeeds and is answered.
+    a.mark_thread_sent(1, &agent);
+    a.append_reply(1, "an answer".into());
+    // The user follows up; round two never reaches the agent.
+    a.append_human_turn(1, "follow-up".into());
+    a.mark_thread_failed(1, "the agent is blocked", Some(false));
+
+    let t = &a.threads()[0];
+    assert_eq!(
+        t.unsent().count(),
+        1,
+        "only the follow-up is pending, not the already-answered question"
+    );
+    assert_eq!(
+        t.unsent().next().unwrap().text,
+        "follow-up",
+        "the original question must not be re-asked"
+    );
+    assert_ne!(t.state, ThreadState::Failed, "nothing was delivered");
+    assert_eq!(
+        t.last().unwrap().author,
+        Author::System,
+        "the failure is recorded in the thread, not just flashed"
+    );
+}
+
+/// A failure that may have reached the agent is durable: a flash lasts three
+/// seconds, and after it the thread would be indistinguishable from one the
+/// agent is still working on.
+#[test]
+fn a_possibly_delivered_failure_is_recorded_on_the_thread() {
+    use herdr_gitview::thread::{Author, ThreadState};
+    let mut a = app_with_notes(vec![note(1, 2, 2, "question")]);
+    a.mark_thread_sent(
+        1,
+        &herdr_gitview::thread::AgentRef {
+            pane: "w1:p1".into(),
+            agent: "claude".into(),
+            session: None,
+            session_kind: None,
+        },
+    );
+    a.mark_thread_failed(1, "timed out waiting for the agent", None);
+
+    let t = &a.threads()[0];
+    assert_eq!(t.state, ThreadState::Failed);
+    assert_eq!(t.last().unwrap().author, Author::System);
+    assert!(
+        t.last().unwrap().text.contains("timed out"),
+        "the reason survives the flash"
+    );
+}
+
+#[test]
 fn threads_survive_a_pane_restart() {
     let dir = std::env::temp_dir().join(format!("gitview-persist-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

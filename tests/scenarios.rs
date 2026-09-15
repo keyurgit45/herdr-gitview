@@ -369,6 +369,95 @@ fn threads_restored_from_disk_reach_the_list_after_connecting() {
     assert_eq!(w.list.app.mode, Mode::Notes);
 }
 
+/// The whole point of the fork: an agent's answer comes back into the thread
+/// that asked, in both panes, without the user doing anything.
+#[test]
+fn an_agents_reply_lands_in_the_thread_that_asked_and_reaches_both_panes() {
+    use herdr_gitview::preview::reply::ReplyMsg;
+    use herdr_gitview::thread::{AgentRef, Author, ThreadState};
+
+    let repo = fixture("notes");
+    write(&repo.dir, "base.txt", "one\ntwo\nchanged\n");
+    let mut w = World::new(repo);
+
+    w.press("a");
+    w.compose("why is this safe?");
+    let id = w.preview.app.threads()[0].id;
+
+    // The worker reports delivery, then the captured reply.
+    w.preview.on_event(
+        preview::Event::Reply(ReplyMsg::Delivered {
+            id,
+            agent: Box::new(AgentRef {
+                pane: "w1:p9".into(),
+                agent: "claude".into(),
+                session: Some("sess-1".into()),
+                session_kind: Some("id".into()),
+            }),
+        }),
+        &mut w.editor,
+    );
+    w.pump();
+    assert_eq!(w.preview.app.threads()[0].state, ThreadState::Sent);
+
+    w.preview.on_event(
+        preview::Event::Reply(ReplyMsg::Replied {
+            id,
+            text: "checked.".into(),
+        }),
+        &mut w.editor,
+    );
+    w.pump();
+
+    let t = &w.preview.app.threads()[0];
+    assert_eq!(t.state, ThreadState::Answered);
+    assert_eq!(t.turns.len(), 2);
+    assert_eq!(t.turns[1].author, Author::Agent);
+    assert_eq!(t.turns[1].text, "checked.");
+    assert!(
+        w.diff_text().contains("checked."),
+        "the reply is rendered in the card:\n{}",
+        w.diff_text()
+    );
+    assert_eq!(
+        w.list.app.notes[0].text, "checked.",
+        "and the list's projection followed"
+    );
+}
+
+/// A delivery failure has to be visible after the flash expires, or a
+/// stranded thread is indistinguishable from one still being worked on.
+#[test]
+fn a_failed_send_is_recorded_in_the_thread_not_just_flashed() {
+    use herdr_gitview::preview::reply::ReplyMsg;
+    use herdr_gitview::thread::{Author, ThreadState};
+
+    let repo = fixture("notes");
+    write(&repo.dir, "base.txt", "one\ntwo\nchanged\n");
+    let mut w = World::new(repo);
+    w.press("a");
+    w.compose("please fix this");
+    let id = w.preview.app.threads()[0].id;
+
+    w.preview.on_event(
+        preview::Event::Reply(ReplyMsg::Failed {
+            id,
+            err: "the agent is waiting on a prompt of its own".into(),
+            delivered: Some(false),
+        }),
+        &mut w.editor,
+    );
+    w.pump();
+
+    let t = &w.preview.app.threads()[0];
+    assert_eq!(t.turns.last().unwrap().author, Author::System);
+    assert!(t.turns.last().unwrap().text.contains("waiting on a prompt"));
+    // Nothing was delivered, so it is still simply pending — not "Failed",
+    // and still counted by the footer as something to send.
+    assert_ne!(t.state, ThreadState::Failed);
+    assert!(t.has_unsent(), "the user can retry once the agent is free");
+}
+
 #[test]
 fn note_flow_annotate_edit_delete_syncs_both_panes() {
     let repo = fixture("notes");

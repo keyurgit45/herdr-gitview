@@ -1173,18 +1173,36 @@ impl PreviewApp {
 
     /// Mark every thread that just had turns delivered. Replaces the old
     /// clear-on-send: the conversation survives so a reply can land in it.
-    pub fn mark_unsent_delivered(&mut self, agent: &crate::thread::AgentRef) {
-        let ids: Vec<u64> = self
-            .store
-            .threads
-            .iter()
-            .filter(|t| t.has_unsent())
-            .map(|t| t.id)
-            .collect();
-        for id in ids {
-            if let Some(t) = self.store.get_mut(id) {
-                t.mark_sent(agent.clone());
-            }
+    /// One thread's question reached the agent. Marked per-thread rather than
+    /// in bulk: threads are now delivered one turn at a time, and an earlier
+    /// one succeeding says nothing about a later one.
+    pub fn mark_thread_sent(&mut self, id: u64, agent: &crate::thread::AgentRef) {
+        if let Some(t) = self.store.get_mut(id) {
+            t.mark_sent(agent.clone());
+            self.threads_changed();
+        }
+    }
+
+    /// Delivery or capture failed. Records it *in the thread* — a flash ages
+    /// out in three seconds and leaves no way to tell a stranded thread from
+    /// one the agent is still working on.
+    ///
+    /// `delivered == Some(false)` is provably undelivered, which means the
+    /// worker never emitted `Delivered` and the thread was never marked sent
+    /// — so its state is already correct and there is nothing to undo.
+    /// Clearing `sent` here would be actively wrong: it would also unmark
+    /// turns delivered by an *earlier*, successful send and re-ask them.
+    ///
+    /// Anything else may already be in front of the agent, so the thread goes
+    /// to `Failed` — resendable, because the user decides, but no longer
+    /// indistinguishable from one the agent is still thinking about.
+    pub fn mark_thread_failed(&mut self, id: u64, err: &str, delivered: Option<bool>) {
+        let Some(t) = self.store.get_mut(id) else {
+            return;
+        };
+        t.push(crate::thread::Author::System, err.to_string());
+        if delivered != Some(false) {
+            t.state = crate::thread::ThreadState::Failed;
         }
         self.threads_changed();
     }
@@ -1193,6 +1211,15 @@ impl PreviewApp {
     pub fn append_reply(&mut self, id: u64, text: String) {
         if let Some(thread) = self.store.get_mut(id) {
             thread.push(Author::Agent, text);
+            self.threads_changed();
+        }
+    }
+
+    /// Add a follow-up question to an existing thread. `push` walks a
+    /// delivered thread back to `Draft`, so it becomes pending again.
+    pub fn append_human_turn(&mut self, id: u64, text: String) {
+        if let Some(thread) = self.store.get_mut(id) {
+            thread.push(Author::Human, text);
             self.threads_changed();
         }
     }
