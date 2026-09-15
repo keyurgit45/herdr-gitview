@@ -12,6 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use super::app::{PreviewApp, State};
 use crate::git::{ChangeKind, Scope};
 use crate::keymap::Action;
+use crate::palette;
 
 pub fn render(frame: &mut Frame, app: &mut PreviewApp) {
     let area = frame.area();
@@ -108,7 +109,7 @@ fn render_body(frame: &mut Frame, area: Rect, app: &PreviewApp) {
         State::Error(msg) => {
             let line = Line::from(Span::styled(
                 format!(" diff error: {msg}"),
-                Style::new().fg(Color::Red),
+                Style::new().fg(palette::BAD),
             ));
             frame.render_widget(Paragraph::new(line), area);
         }
@@ -144,7 +145,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &PreviewApp) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 " enter save · shift+enter / ctrl+j newline · esc cancel",
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(palette::ACCENT),
             )))
             .style(Style::new().bg(bar_bg(app.cfg.theme))),
             area,
@@ -155,7 +156,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &PreviewApp) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!(" {msg}"),
-                Style::new().fg(Color::Yellow),
+                Style::new().fg(palette::ACCENT),
             )))
             .style(Style::new().bg(bar_bg(app.cfg.theme))),
             area,
@@ -223,7 +224,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &PreviewApp) {
         }
         spans.push(Span::styled(
             format!(" {key} "),
-            Style::new().fg(Color::Cyan),
+            Style::new().fg(palette::INFO),
         ));
         spans.push(Span::styled(label.to_string(), dim()));
     }

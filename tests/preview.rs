@@ -670,13 +670,16 @@ fn the_commented_line_gets_an_accented_gutter() {
     let y = (1..H - 1)
         .find(|y| row(&buf, *y).contains("line 3")) // "line 3" is new-file line 4
         .expect("anchor row not visible");
-    let accented = (0..8).any(|x| buf[(x, y)].style().fg == Some(ratatui::style::Color::Yellow));
+    // Compare against the palette constant, not a literal hue: the accent is
+    // deliberately RGB so a stylised terminal theme cannot reassign it.
+    let accent = Some(herdr_gitview::palette::ACCENT);
+    let accented = (0..8).any(|x| buf[(x, y)].style().fg == accent);
     assert!(accented, "gutter of the commented line is not accented");
     // An uncommented row is not accented.
     let other = (1..H - 1)
         .find(|y| row(&buf, *y).contains("line 6"))
         .expect("other row");
-    assert!(!(0..8).any(|x| buf[(x, other)].style().fg == Some(ratatui::style::Color::Yellow)));
+    assert!(!(0..8).any(|x| buf[(x, other)].style().fg == accent));
 }
 
 #[test]

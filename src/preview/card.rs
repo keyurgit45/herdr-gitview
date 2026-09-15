@@ -9,6 +9,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::palette;
 use crate::textarea::TextArea;
 
 /// Floor for the card width, so a card still has a shape before the first
@@ -53,16 +54,18 @@ pub fn anchor_of(built: &super::render::DiffDoc, end: u32) -> (usize, bool) {
 /// non-default style: the body loop rewrites default-styled spans to the body
 /// colour, silently flattening anything that forgot.
 pub fn title_style() -> Style {
-    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    Style::new()
+        .fg(palette::ACCENT)
+        .add_modifier(Modifier::BOLD)
 }
 
 pub fn badge_style(state: crate::thread::ThreadState) -> Style {
     use crate::thread::ThreadState as S;
     let c = match state {
         S::Draft => Color::Gray,
-        S::Sent => Color::Cyan,
-        S::Answered => Color::Green,
-        S::Failed => Color::Red,
+        S::Sent => palette::INFO,
+        S::Answered => palette::OK,
+        S::Failed => palette::BAD,
         S::Resolved => Color::DarkGray,
     };
     Style::new().fg(c)
@@ -94,7 +97,7 @@ pub fn accent_gutter(lines: &mut [Line<'static>], idx: usize, built: &super::ren
         _ => 1,                  // insertion/deletion: "▌" then "1234 "
     };
     if let Some(span) = lines.get_mut(idx).and_then(|l| l.spans.get_mut(span_idx)) {
-        span.style = span.style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        span.style = span.style.fg(palette::ACCENT).add_modifier(Modifier::BOLD);
     }
 }
 
@@ -103,12 +106,12 @@ pub fn accent_gutter(lines: &mut [Line<'static>], idx: usize, built: &super::ren
 fn role_label(turn: &crate::thread::Turn, agent: Option<&str>) -> (String, Style) {
     use crate::thread::Author;
     match turn.author {
-        Author::Human => ("you".to_string(), Style::new().fg(Color::Yellow)),
+        Author::Human => ("you".to_string(), Style::new().fg(palette::ACCENT)),
         Author::Agent => (
             agent.unwrap_or("agent").to_string(),
-            Style::new().fg(Color::Green),
+            Style::new().fg(palette::OK),
         ),
-        Author::System => ("system".to_string(), Style::new().fg(Color::Red)),
+        Author::System => ("system".to_string(), Style::new().fg(palette::BAD)),
     }
 }
 
@@ -332,7 +335,7 @@ pub fn card_box_titled(
     let box_w = card_box_width(width);
     let text_w = card_text_width(width);
     let border = Style::new().fg(if accent {
-        Color::Yellow
+        palette::ACCENT
     } else if theme.is_light() {
         Color::Rgb(0x9a, 0xa0, 0xa6)
     } else {

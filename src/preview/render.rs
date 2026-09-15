@@ -11,6 +11,7 @@ use similar::{ChangeTag, TextDiff};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::highlight::{Highlighter, Rgb, Run};
+use crate::palette;
 
 /// A `[start, end)` run of char indices within a line, for word emphasis.
 type CharRange = (u32, u32);
@@ -627,7 +628,7 @@ fn to_text(rows: &[Row], p: &Palette, default_fg: Rgb) -> (Text<'static>, Vec<us
                 runs,
                 emphasis,
             } => {
-                let bar_style = Style::new().fg(Color::Red).bg(rgb(p.del_bg));
+                let bar_style = Style::new().fg(palette::BAD).bg(rgb(p.del_bg));
                 let mut spans = vec![
                     Span::styled("▌".to_string(), bar_style),
                     Span::styled(format!("{old_no:>4} "), gutter_style),
@@ -640,7 +641,7 @@ fn to_text(rows: &[Row], p: &Palette, default_fg: Rgb) -> (Text<'static>, Vec<us
                 runs,
                 emphasis,
             } => {
-                let bar_style = Style::new().fg(Color::Green).bg(rgb(p.ins_bg));
+                let bar_style = Style::new().fg(palette::OK).bg(rgb(p.ins_bg));
                 let mut spans = vec![
                     Span::styled("▌".to_string(), bar_style),
                     Span::styled(format!("{new_no:>4} "), gutter_style),

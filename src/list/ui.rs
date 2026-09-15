@@ -13,6 +13,7 @@ use super::App;
 use super::app::{ListRow, Modal, Mode};
 use crate::git::{ChangeKind, CommitInfo, FileEntry, Scope, StageState};
 use crate::keymap::Action;
+use crate::palette;
 use crate::textarea::elide_tail;
 
 /// Actions shown in the help overlay, in a sensible reading order.
@@ -154,14 +155,14 @@ fn header_right_spans(app: &App) -> Vec<Span<'static>> {
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(
                     format!("+{adds}"),
-                    Style::new().fg(Color::Green),
+                    Style::new().fg(palette::OK),
                 ));
             }
             if dels > 0 {
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(
                     format!("−{dels}"),
-                    Style::new().fg(Color::Red),
+                    Style::new().fg(palette::BAD),
                 ));
             }
             spans.push(Span::raw(" "));
@@ -195,7 +196,7 @@ fn render_body(frame: &mut Frame, area: Rect, app: &mut App) {
             };
             frame.render_widget(
                 Paragraph::new(vec![
-                    Line::from(Span::styled(err.clone(), Style::new().fg(Color::Red))),
+                    Line::from(Span::styled(err.clone(), Style::new().fg(palette::BAD))),
                     Line::from(Span::styled("r retries".to_string(), dim())),
                 ])
                 .alignment(Alignment::Center)
@@ -279,7 +280,7 @@ fn header_row(title: &str, count: usize) -> ListItem<'static> {
     ListItem::new(Line::from(vec![
         Span::styled(
             format!(" ▾ {}", title.to_uppercase()),
-            Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            Style::new().fg(palette::INFO).add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!("  {count}"), dim()),
     ]))
@@ -336,7 +337,7 @@ fn note_file_row(name: &str, count: usize, width: u16) -> ListItem<'static> {
     ListItem::new(Line::from(vec![
         Span::styled(
             format!(" ▾ {name}"),
-            Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            Style::new().fg(palette::INFO).add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!("  {count}"), dim()),
     ]))
@@ -361,10 +362,10 @@ fn note_row(note: &crate::ipc::NoteMeta, width: u16) -> ListItem<'static> {
     ListItem::new(vec![
         Line::from(Span::styled(
             format!("   ▎ {anchor}"),
-            Style::new().fg(Color::Yellow),
+            Style::new().fg(palette::ACCENT),
         )),
         Line::from(vec![
-            Span::styled("   ▎ ".to_string(), Style::new().fg(Color::Yellow)),
+            Span::styled("   ▎ ".to_string(), Style::new().fg(palette::ACCENT)),
             Span::raw(text),
         ]),
     ])
@@ -379,7 +380,7 @@ fn commit_row(c: &CommitInfo, width: u16) -> ListItem<'static> {
     let subject = elide_tail(&c.subject, avail);
     let pad = width.saturating_sub(short.width() + subject.width() + date.width());
     ListItem::new(Line::from(vec![
-        Span::styled(short, Style::new().fg(Color::Yellow)),
+        Span::styled(short, Style::new().fg(palette::ACCENT)),
         Span::raw(subject),
         Span::raw(" ".repeat(pad)),
         Span::styled(date, dim()),
@@ -388,12 +389,12 @@ fn commit_row(c: &CommitInfo, width: u16) -> ListItem<'static> {
 
 fn marker(kind: ChangeKind) -> (char, Color) {
     match kind {
-        ChangeKind::Modified => ('M', Color::Yellow),
-        ChangeKind::Added => ('A', Color::Green),
-        ChangeKind::Deleted => ('D', Color::Red),
-        ChangeKind::Renamed => ('R', Color::Cyan),
-        ChangeKind::Untracked => ('U', Color::Green),
-        ChangeKind::Conflicted => ('!', Color::Red),
+        ChangeKind::Modified => ('M', palette::ACCENT),
+        ChangeKind::Added => ('A', palette::OK),
+        ChangeKind::Deleted => ('D', palette::BAD),
+        ChangeKind::Renamed => ('R', palette::INFO),
+        ChangeKind::Untracked => ('U', palette::OK),
+        ChangeKind::Conflicted => ('!', palette::BAD),
     }
 }
 
@@ -409,7 +410,7 @@ fn stats(entry: &FileEntry) -> (String, Vec<Span<'static>>) {
         text.push_str(&format!("+{adds}"));
         spans.push(Span::styled(
             format!("+{adds}"),
-            Style::new().fg(Color::Green),
+            Style::new().fg(palette::OK),
         ));
     }
     if dels > 0 {
@@ -420,7 +421,7 @@ fn stats(entry: &FileEntry) -> (String, Vec<Span<'static>>) {
         text.push_str(&format!("−{dels}"));
         spans.push(Span::styled(
             format!("−{dels}"),
-            Style::new().fg(Color::Red),
+            Style::new().fg(palette::BAD),
         ));
     }
     (text, spans)
@@ -470,7 +471,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let line = match app.active_status() {
         Some(msg) => Line::from(Span::styled(
             format!(" {msg}"),
-            Style::new().fg(Color::Yellow),
+            Style::new().fg(palette::ACCENT),
         )),
         None => footer_hints(app, area.width as usize),
     };
@@ -619,7 +620,7 @@ fn hint_line(pairs: Vec<(String, &str)>, width: usize) -> Line<'static> {
         }
         spans.push(Span::styled(
             format!(" {key} "),
-            Style::new().fg(Color::Cyan),
+            Style::new().fg(palette::INFO),
         ));
         spans.push(Span::styled(label.to_string(), dim()));
     }
@@ -645,7 +646,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled(
                     format!(" {:>8}  ", app.keys.hint(*action)),
-                    Style::new().fg(Color::Cyan),
+                    Style::new().fg(palette::INFO),
                 ),
                 Span::raw((*label).to_string()),
             ])

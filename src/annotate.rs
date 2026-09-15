@@ -15,6 +15,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
+use crate::palette;
 use crate::popup::write_answer;
 
 pub fn run_pick_agent() -> Result<()> {
@@ -125,8 +126,8 @@ pub fn run_pick_agent() -> Result<()> {
 
 fn color_for_status(status: &str) -> Color {
     match status {
-        "idle" => Color::Green,
-        "working" => Color::Yellow,
+        "idle" => palette::OK,
+        "working" => palette::ACCENT,
         _ => Color::DarkGray,
     }
 }

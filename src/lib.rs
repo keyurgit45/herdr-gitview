@@ -12,6 +12,7 @@ pub mod list;
 pub mod logx;
 pub mod nvim;
 pub mod orchestrate;
+pub mod palette;
 pub mod popup;
 pub mod preview;
 pub mod probe;

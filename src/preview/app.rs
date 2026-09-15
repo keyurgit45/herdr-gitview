@@ -21,6 +21,7 @@ const MAX_LINES: usize = 20_000;
 
 use super::card::{self, Card, MIN_WIDTH as MIN_CARD_WIDTH};
 use super::compose::{Composer, Outcome};
+use crate::palette;
 
 /// The fields of a `ToPreview::Show`, kept together so we can compare the
 /// request that produced a diff against the one currently selected (stale
@@ -396,7 +397,10 @@ impl PreviewApp {
                         // Its line is gone from this diff (the file changed
                         // under it). Say so rather than quietly rendering it
                         // at the top as if it were a whole-file note.
-                        title.push(Span::styled("· anchor lost ", Style::new().fg(Color::Red)));
+                        title.push(Span::styled(
+                            "· anchor lost ",
+                            Style::new().fg(palette::BAD),
+                        ));
                     }
                     Card {
                         anchor,

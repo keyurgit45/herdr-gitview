@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use crate::palette;
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui::layout::{Alignment, Constraint, Layout};
@@ -57,7 +58,7 @@ pub fn run() -> Result<()> {
                     yes,
                     Style::new()
                         .fg(Color::Black)
-                        .bg(Color::Green)
+                        .bg(palette::OK)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("   "),
@@ -65,7 +66,7 @@ pub fn run() -> Result<()> {
                     no,
                     Style::new()
                         .fg(Color::Black)
-                        .bg(Color::Red)
+                        .bg(palette::BAD)
                         .add_modifier(Modifier::BOLD),
                 ),
             ]);
