@@ -388,6 +388,7 @@ fn an_agents_reply_lands_in_the_thread_that_asked_and_reaches_both_panes() {
     w.preview.on_event(
         preview::Event::Reply(ReplyMsg::Delivered {
             id,
+            turns: vec![0],
             agent: Box::new(AgentRef {
                 pane: "w1:p9".into(),
                 agent: "claude".into(),
@@ -425,6 +426,43 @@ fn an_agents_reply_lands_in_the_thread_that_asked_and_reaches_both_panes() {
     );
 }
 
+/// Regression: the reply worker is serial and one turn takes minutes, so a
+/// queued thread sits untouched with the send flash long expired. Pressing
+/// send again must not queue it a second time — that asks the agent the same
+/// question twice and lands two replies in one thread.
+#[test]
+fn pressing_send_twice_does_not_ask_the_agent_the_same_question_twice() {
+    let repo = fixture("notes");
+    write(&repo.dir, "base.txt", "one\ntwo\nchanged\n");
+    let mut w = World::new(repo);
+    w.press("a");
+    w.compose("please fix this");
+    let id = w.preview.app.threads()[0].id;
+
+    w.preview.dispatch("w1:p9");
+    assert!(
+        w.preview.app.in_flight.contains(&id),
+        "the thread is queued with the worker"
+    );
+
+    // The worker has not reported anything yet — the real case, since it is
+    // blocked in `agent prompt --wait`. Press send again.
+    w.preview.dispatch("w1:p9");
+    assert_eq!(
+        w.preview.app.in_flight.len(),
+        1,
+        "still exactly one queued request, not two"
+    );
+    assert!(
+        w.preview
+            .app
+            .active_flash()
+            .is_some_and(|f| f.contains("already asking")),
+        "and the user is told why nothing new happened: {:?}",
+        w.preview.app.active_flash()
+    );
+}
+
 /// A delivery failure has to be visible after the flash expires, or a
 /// stranded thread is indistinguishable from one still being worked on.
 #[test]
@@ -442,8 +480,9 @@ fn a_failed_send_is_recorded_in_the_thread_not_just_flashed() {
     w.preview.on_event(
         preview::Event::Reply(ReplyMsg::Failed {
             id,
+            turns: vec![0],
             err: "the agent is waiting on a prompt of its own".into(),
-            delivered: Some(false),
+            retry: herdr_gitview::preview::reply::Retry::Pending,
         }),
         &mut w.editor,
     );

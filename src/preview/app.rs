@@ -137,6 +137,10 @@ pub struct PreviewApp {
     card_lines: Vec<usize>,
     /// Threads the user has collapsed to their newest turn (`z`).
     collapsed: std::collections::HashSet<u64>,
+    /// Threads queued with the reply worker but not yet finished. Deliberately
+    /// not persisted: a queue lives in a worker thread that dies with the
+    /// pane, so restoring it would claim requests nobody is going to run.
+    pub in_flight: std::collections::HashSet<u64>,
     /// The first doc line of each note's card, keyed by note id.
     /// `(thread id, first doc line, height)` for each card in the shown file.
     /// The height is recorded here rather than re-derived from `card_lines`:
@@ -191,6 +195,7 @@ impl PreviewApp {
             shown_file: None,
             card_lines: Vec::new(),
             collapsed: std::collections::HashSet::new(),
+            in_flight: std::collections::HashSet::new(),
             card_starts: Vec::new(),
             composer_span: None,
             pending_focus: None,
@@ -372,7 +377,16 @@ impl PreviewApp {
                             card::dim_style(),
                         ));
                     }
-                    if t.state != crate::thread::ThreadState::Draft {
+                    // In flight beats the stored state: between queuing and
+                    // delivery a thread is still `Draft` on disk, and showing
+                    // "draft" for the minutes an agent takes reads as "your
+                    // send did nothing".
+                    if self.in_flight.contains(&t.id) {
+                        title.push(Span::styled(
+                            "· asking… ",
+                            card::badge_style(crate::thread::ThreadState::Sent),
+                        ));
+                    } else if t.state != crate::thread::ThreadState::Draft {
                         title.push(Span::styled(
                             format!("· {} ", t.state.badge()),
                             card::badge_style(t.state),
@@ -1173,35 +1187,69 @@ impl PreviewApp {
 
     /// Mark every thread that just had turns delivered. Replaces the old
     /// clear-on-send: the conversation survives so a reply can land in it.
-    /// One thread's question reached the agent. Marked per-thread rather than
-    /// in bulk: threads are now delivered one turn at a time, and an earlier
-    /// one succeeding says nothing about a later one.
-    pub fn mark_thread_sent(&mut self, id: u64, agent: &crate::thread::AgentRef) {
-        if let Some(t) = self.store.get_mut(id) {
-            t.mark_sent(agent.clone());
-            self.threads_changed();
+    /// Re-render and re-broadcast without changing any thread. Used when
+    /// something outside the store changes how threads should read — queuing
+    /// a send, for instance.
+    pub fn redraw_threads(&mut self) {
+        self.threads_changed();
+    }
+
+    /// Exactly the turns that were asked about are marked sent — not every
+    /// Human turn in the thread. A request can sit in the worker's queue
+    /// behind a multi-minute one, and the thread may gain a turn in the
+    /// meantime; marking that one sent would retire text nobody asked about.
+    ///
+    /// `mark_sent` is not used for the same reason: it marks all of them.
+    pub fn mark_turns_sent(&mut self, id: u64, turns: &[usize], agent: &crate::thread::AgentRef) {
+        let Some(t) = self.store.get_mut(id) else {
+            return;
+        };
+        for &i in turns {
+            if let Some(turn) = t.turns.get_mut(i) {
+                turn.sent = true;
+            }
         }
+        t.agent = Some(agent.clone());
+        // An answered thread that has since been asked a follow-up must not
+        // be dragged back to `Sent` by a late delivery for the earlier turn.
+        if t.state != crate::thread::ThreadState::Answered {
+            t.state = crate::thread::ThreadState::Sent;
+        }
+        t.updated_at = crate::thread::now_epoch();
+        self.threads_changed();
     }
 
     /// Delivery or capture failed. Records it *in the thread* — a flash ages
     /// out in three seconds and leaves no way to tell a stranded thread from
     /// one the agent is still working on.
     ///
-    /// `delivered == Some(false)` is provably undelivered, which means the
-    /// worker never emitted `Delivered` and the thread was never marked sent
-    /// — so its state is already correct and there is nothing to undo.
-    /// Clearing `sent` here would be actively wrong: it would also unmark
-    /// turns delivered by an *earlier*, successful send and re-ask them.
+    /// `still_pending` means the question provably never reached the agent,
+    /// so exactly the turns this attempt claimed are handed back — and only
+    /// those. Clearing every Human turn would also unmark ones delivered by
+    /// an *earlier*, successful send and silently re-ask them.
     ///
-    /// Anything else may already be in front of the agent, so the thread goes
-    /// to `Failed` — resendable, because the user decides, but no longer
-    /// indistinguishable from one the agent is still thinking about.
-    pub fn mark_thread_failed(&mut self, id: u64, err: &str, delivered: Option<bool>) {
+    /// The undo is needed because `Delivered` is optimistic: it fires before
+    /// herdr has accepted the prompt, so a refusal can arrive after the turns
+    /// were already marked sent.
+    ///
+    /// Otherwise the question may be in front of the agent already, so the
+    /// thread goes to `Failed` — still resendable, because that is the user's
+    /// call, but no longer indistinguishable from one being worked on.
+    pub fn mark_thread_failed(&mut self, id: u64, turns: &[usize], err: &str, still_pending: bool) {
         let Some(t) = self.store.get_mut(id) else {
             return;
         };
         t.push(crate::thread::Author::System, err.to_string());
-        if delivered != Some(false) {
+        if still_pending {
+            for &i in turns {
+                if let Some(turn) = t.turns.get_mut(i) {
+                    turn.sent = false;
+                }
+            }
+            if t.has_unsent() {
+                t.state = crate::thread::ThreadState::Draft;
+            }
+        } else {
             t.state = crate::thread::ThreadState::Failed;
         }
         self.threads_changed();

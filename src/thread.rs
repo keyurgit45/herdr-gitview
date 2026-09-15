@@ -183,6 +183,17 @@ impl Thread {
             .filter(|t| t.author == Author::Human && !t.sent)
     }
 
+    /// Positions of the unsent Human turns, so a delivery can mark back
+    /// exactly what it asked about rather than every Human turn.
+    pub fn unsent_indices(&self) -> Vec<usize> {
+        self.turns
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.author == Author::Human && !t.sent)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// The last Human turn that may still be rewritten in place.
     pub fn editable_turn(&self) -> Option<usize> {
         self.turns
@@ -203,7 +214,12 @@ impl Thread {
             // Leaving it `Answered` would render a "replied" badge on a
             // thread the footer is simultaneously counting as unsent.
             // `Resolved` and `Failed` are deliberately terminal.
-            Author::Human if matches!(self.state, ThreadState::Sent | ThreadState::Answered) => {
+            Author::Human
+                if matches!(
+                    self.state,
+                    ThreadState::Sent | ThreadState::Answered | ThreadState::Failed
+                ) =>
+            {
                 self.state = ThreadState::Draft;
             }
             _ => {}

@@ -157,25 +157,41 @@ impl Session {
     /// Queue one request per unsent thread. One thread per turn: a batch
     /// would get back a single reply with no honest way to say which question
     /// it answered.
-    fn dispatch(&mut self, pane: &str) {
-        let pending: Vec<(u64, String)> = self
+    pub fn dispatch(&mut self, pane: &str) {
+        // Already-queued threads are skipped. The worker is serial and one
+        // turn takes minutes, so without this a second press — entirely
+        // reasonable, since the first press's flash expired long ago —
+        // queues the same question again and the agent is asked it twice.
+        let pending: Vec<(u64, Vec<usize>, String)> = self
             .app
             .store
             .threads
             .iter()
-            .filter(|t| t.has_unsent())
-            .map(|t| (t.id, super::reply::compose_prompt(t)))
+            .filter(|t| t.has_unsent() && !self.app.in_flight.contains(&t.id))
+            .map(|t| {
+                (
+                    t.id,
+                    t.unsent_indices(),
+                    super::reply::compose_prompt(&self.app.repo.root, t),
+                )
+            })
             .collect();
         if pending.is_empty() {
-            self.app.flash("nothing unsent");
+            let busy = self.app.in_flight.len();
+            self.app.flash(if busy == 0 {
+                "nothing unsent".to_string()
+            } else {
+                format!("already asking about {busy} thread(s)")
+            });
             return;
         }
-        let n = pending.len();
-        for (id, prompt) in pending {
+        let mut n = 0usize;
+        for (id, turns, prompt) in pending {
             let req = super::reply::ReplyReq {
                 pane: pane.to_string(),
                 id,
                 prompt,
+                turns,
                 timeout_ms: super::reply::DEFAULT_TIMEOUT_MS,
             };
             if self.reply_tx.send(req).is_err() {
@@ -183,7 +199,10 @@ impl Session {
                     .flash("the reply worker is gone — restart the view");
                 return;
             }
+            self.app.in_flight.insert(id);
+            n += 1;
         }
+        self.app.redraw_threads();
         self.app.flash(format!(
             "asking {pane} about {n} thread{}…",
             if n == 1 { "" } else { "s" }
@@ -191,19 +210,27 @@ impl Session {
     }
 
     fn on_reply(&mut self, msg: super::reply::ReplyMsg) {
-        use super::reply::ReplyMsg as M;
+        use super::reply::{ReplyMsg as M, Retry};
+        if msg.is_terminal() {
+            self.app.in_flight.remove(&msg.id());
+        }
         match msg {
-            M::Delivered { id, agent } => self.app.mark_thread_sent(id, &agent),
+            M::Delivered { id, turns, agent } => self.app.mark_turns_sent(id, &turns, &agent),
             M::Replied { id, text } => {
                 self.app.append_reply(id, text);
                 self.app.flash(format!("thread {id} answered"));
             }
-            M::Failed { id, err, delivered } => {
+            M::Failed {
+                id,
+                turns,
+                err,
+                retry,
+            } => {
                 // A failed send must leave a durable mark, not just a flash
                 // that ages out in three seconds: the thread is otherwise
-                // stranded in `Sent` with no way to tell it apart from one
-                // the agent is still thinking about.
-                self.app.mark_thread_failed(id, &err, delivered);
+                // indistinguishable from one the agent is still working on.
+                self.app
+                    .mark_thread_failed(id, &turns, &err, retry == Retry::Pending);
                 self.app.flash(format!("thread {id}: {err}"));
             }
         }

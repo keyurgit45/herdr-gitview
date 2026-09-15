@@ -1263,7 +1263,7 @@ fn sending_marks_only_the_thread_that_was_actually_asked() {
         session: None,
         session_kind: None,
     };
-    a.mark_thread_sent(1, &agent);
+    a.mark_turns_sent(1, &[0], &agent);
 
     assert_eq!(a.threads()[0].state, ThreadState::Sent);
     assert!(!a.threads()[0].has_unsent());
@@ -1289,11 +1289,11 @@ fn an_undelivered_failure_leaves_earlier_delivered_turns_alone() {
         session_kind: None,
     };
     // Round one succeeds and is answered.
-    a.mark_thread_sent(1, &agent);
+    a.mark_turns_sent(1, &[0], &agent);
     a.append_reply(1, "an answer".into());
     // The user follows up; round two never reaches the agent.
     a.append_human_turn(1, "follow-up".into());
-    a.mark_thread_failed(1, "the agent is blocked", Some(false));
+    a.mark_thread_failed(1, &[2], "the agent is blocked", true);
 
     let t = &a.threads()[0];
     assert_eq!(
@@ -1314,6 +1314,63 @@ fn an_undelivered_failure_leaves_earlier_delivered_turns_alone() {
     );
 }
 
+/// Regression: a request can wait in the worker's queue behind a multi-minute
+/// turn, and the thread can gain a turn while it waits. Delivery must mark
+/// only the turns the prompt was actually composed from — marking "every
+/// Human turn" retires text the agent was never asked about.
+#[test]
+fn delivery_marks_only_the_turns_that_were_asked_about() {
+    let mut a = app_with_notes(vec![note(1, 2, 2, "first question")]);
+    let agent = herdr_gitview::thread::AgentRef {
+        pane: "w1:p1".into(),
+        agent: "claude".into(),
+        session: None,
+        session_kind: None,
+    };
+    // Queued with turn 0 only; the user then adds a second question.
+    let asked = a.threads()[0].unsent_indices();
+    assert_eq!(asked, vec![0]);
+    a.append_human_turn(1, "second question".into());
+
+    a.mark_turns_sent(1, &asked, &agent);
+
+    let t = &a.threads()[0];
+    assert_eq!(
+        t.unsent().count(),
+        1,
+        "the turn added after queuing is still pending"
+    );
+    assert_eq!(t.unsent().next().unwrap().text, "second question");
+}
+
+/// Regression: `Delivered` is optimistic — it fires before herdr has accepted
+/// the prompt. A refusal arriving after it must hand back exactly the turns
+/// that attempt claimed, or the thread is stranded as sent-but-never-asked.
+#[test]
+fn a_refusal_after_optimistic_delivery_hands_the_question_back() {
+    use herdr_gitview::thread::ThreadState;
+    let mut a = app_with_notes(vec![note(1, 2, 2, "please fix this")]);
+    let agent = herdr_gitview::thread::AgentRef {
+        pane: "w1:p1".into(),
+        agent: "claude".into(),
+        session: None,
+        session_kind: None,
+    };
+    a.mark_turns_sent(1, &[0], &agent);
+    assert!(!a.threads()[0].has_unsent(), "optimistically marked sent");
+
+    // herdr then rejects it: the agent was blocked. Nothing was delivered.
+    a.mark_thread_failed(1, &[0], "the agent is blocked", true);
+
+    let t = &a.threads()[0];
+    assert!(
+        t.has_unsent(),
+        "the question is pending again and can be re-sent"
+    );
+    assert_eq!(t.state, ThreadState::Draft);
+    assert_ne!(t.state, ThreadState::Sent, "not stranded as sent");
+}
+
 /// A failure that may have reached the agent is durable: a flash lasts three
 /// seconds, and after it the thread would be indistinguishable from one the
 /// agent is still working on.
@@ -1321,8 +1378,9 @@ fn an_undelivered_failure_leaves_earlier_delivered_turns_alone() {
 fn a_possibly_delivered_failure_is_recorded_on_the_thread() {
     use herdr_gitview::thread::{Author, ThreadState};
     let mut a = app_with_notes(vec![note(1, 2, 2, "question")]);
-    a.mark_thread_sent(
+    a.mark_turns_sent(
         1,
+        &[0],
         &herdr_gitview::thread::AgentRef {
             pane: "w1:p1".into(),
             agent: "claude".into(),
@@ -1330,7 +1388,7 @@ fn a_possibly_delivered_failure_is_recorded_on_the_thread() {
             session_kind: None,
         },
     );
-    a.mark_thread_failed(1, "timed out waiting for the agent", None);
+    a.mark_thread_failed(1, &[0], "timed out waiting for the agent", false);
 
     let t = &a.threads()[0];
     assert_eq!(t.state, ThreadState::Failed);

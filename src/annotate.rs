@@ -2,16 +2,14 @@
 //! themselves are written in the diff pane's inline composer, not here.
 //!
 //! - `pick-agent`: choose an agent pane from `GITVIEW_AGENTS` (JSON
-//!   `[[pane_id, agent, status], …]`); writes `pane\tplace`, `pane\tsubmit`,
-//!   or `cancel`. Enter places the notes in the agent's prompt; shift+enter
-//!   or ctrl+enter also submits them.
+//!   `[[pane_id, agent, status], …]`); writes `pane\tsubmit` or `cancel`.
+//!   Choosing asks the agent — there is no place-without-sending mode, since
+//!   that required typing into the pane past herdr's blocked-agent check.
 
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui::layout::{Alignment, Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -84,7 +82,7 @@ pub fn run_pick_agent() -> Result<()> {
             state.select(Some(cursor));
             frame.render_stateful_widget(list, chunks[1], &mut state);
             frame.render_widget(
-                Paragraph::new("enter place in prompt · shift/ctrl+enter send now\nesc cancel")
+                Paragraph::new("enter ask the agent\nesc cancel")
                     .alignment(Alignment::Center)
                     .style(Style::new().add_modifier(Modifier::DIM)),
                 chunks[2],
@@ -96,14 +94,11 @@ pub fn run_pick_agent() -> Result<()> {
         }
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Enter
-                    if key
-                        .modifiers
-                        .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) =>
-                {
-                    break format!("{}\tsubmit", agents[cursor].0);
-                }
-                KeyCode::Enter => break format!("{}\tplace", agents[cursor].0),
+                // There is no "place in the prompt without sending" any more:
+                // that needed `pane send-text`, which types past herdr's
+                // blocked-agent check and would answer an open approval
+                // dialog with review text. Every choice asks the agent.
+                KeyCode::Enter => break format!("{}\tsubmit", agents[cursor].0),
                 KeyCode::Down | KeyCode::Char('j') => {
                     cursor = (cursor + 1).min(agents.len() - 1);
                 }
@@ -116,7 +111,7 @@ pub fn run_pick_agent() -> Result<()> {
                 let idx = m.row.saturating_sub(1) as usize;
                 if idx < agents.len() {
                     if cursor == idx {
-                        break format!("{}\tplace", agents[idx].0); // click-click = choose
+                        break format!("{}\tsubmit", agents[idx].0); // click-click = choose
                     }
                     cursor = idx;
                 }

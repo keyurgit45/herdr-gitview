@@ -181,7 +181,14 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &PreviewApp) {
     }
     // Count what is actually deliverable, not how many conversations
     // exist — an answered thread stays in the store with nothing pending.
-    let unsent = app.store.threads.iter().filter(|t| t.has_unsent()).count();
+    // Queued threads are not offerable: the request is already with the
+    // worker, and counting them invites a second press that asks twice.
+    let unsent = app
+        .store
+        .threads
+        .iter()
+        .filter(|t| t.has_unsent() && !app.in_flight.contains(&t.id))
+        .count();
     if unsent > 0 {
         pairs.push((hint(Action::SendNotes), format!("send ({unsent})")));
     }
