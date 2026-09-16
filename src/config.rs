@@ -45,6 +45,21 @@ pub struct Config {
     /// or the herdr-nvim sidebar), Enter opens the file there instead of
     /// starting an editor on the gitview diff pane.
     pub reuse_tab_nvim: bool,
+    /// Extra refs the commit history shows alongside HEAD, so a push to an
+    /// integration branch turns up without leaving the view.
+    ///
+    /// Deliberately a short list rather than `--all`: a working repo can
+    /// easily carry hundreds of branches, and interleaving every one of them
+    /// buries your own history. These refs are also the only ones the log
+    /// labels, for the same reason — a commit can be pointed at by dozens.
+    ///
+    /// Refs that do not exist are dropped silently, so the same config works
+    /// across repos with different branch names.
+    pub log_refs: Vec<String>,
+    /// How often to `git fetch` the watched refs, in ms. 0 disables it.
+    /// Floored at 30s when non-zero — this is network I/O, not a poll of
+    /// the local index.
+    pub fetch_interval_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -92,6 +107,8 @@ impl Default for Config {
             view_width_percent: 50,
             list_width_percent: 25,
             reuse_tab_nvim: true,
+            log_refs: vec!["origin/staging".into()],
+            fetch_interval_ms: 300_000,
         }
     }
 }
@@ -125,6 +142,13 @@ impl Config {
         if cfg.poll_ms > 0 {
             cfg.poll_ms = cfg.poll_ms.max(250);
         }
+        // Fetching talks to the network and takes seconds, not milliseconds.
+        // A 30s floor stops a typo turning the view into a remote hammer.
+        if cfg.fetch_interval_ms > 0 {
+            cfg.fetch_interval_ms = cfg.fetch_interval_ms.max(30_000);
+        }
+        // An empty entry would become a bare `git log ""`, which errors.
+        cfg.log_refs.retain(|r| !r.trim().is_empty());
         cfg
     }
 }

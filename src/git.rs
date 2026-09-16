@@ -23,6 +23,11 @@ pub struct CommitInfo {
     /// Everything after the subject line, verbatim. Empty for the many
     /// commits that are a subject and nothing else.
     pub body: String,
+    /// Watched refs pointing at this commit, e.g. `["origin/staging"]` or
+    /// `["HEAD -> chat-onboarding-v3"]`. Only refs the caller asked to be
+    /// decorated appear — a commit in a busy repo can be pointed at by
+    /// dozens, and labelling all of them would crowd out the subject.
+    pub refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,27 +484,102 @@ impl Repo {
         self.log_range(Some(&format!("{merge_base}..HEAD")), limit)
     }
 
+    /// Which of `refs` actually resolve in this repo, in the order given.
+    ///
+    /// A ref list is configuration, and the same config is used across repos
+    /// with different branch names — so a missing ref is normal, not an
+    /// error. Passing one to `git log` would abort the whole command.
+    pub fn existing_refs(&self, refs: &[String]) -> Vec<String> {
+        refs.iter()
+            .filter(|r| {
+                self.git(&[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{r}^{{commit}}"),
+                ])
+                .is_ok()
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// HEAD's history plus `refs`, newest first, with those refs labelled.
+    ///
+    /// The union rather than `--all`: a real repo carries hundreds of
+    /// branches, and interleaving all of them buries your own work. The same
+    /// list bounds `--decorate-refs`, so a commit shows only the labels you
+    /// asked about instead of every branch that happens to point at it.
+    pub fn log_with_refs(&self, refs: &[String], limit: usize) -> Result<Vec<CommitInfo>> {
+        let live = self.existing_refs(refs);
+        if live.is_empty() {
+            return self.log_commits(limit);
+        }
+        // HEAD and the current branch are always labelled: "which of these is
+        // mine" is the first question the list has to answer.
+        let mut decorate: Vec<String> = vec!["--decorate-refs=HEAD".into()];
+        if let Some(branch) = self.head_branch() {
+            decorate.push(format!("--decorate-refs=refs/heads/{branch}"));
+        }
+        for r in &live {
+            decorate.push(format!("--decorate-refs=refs/heads/{r}"));
+            decorate.push(format!("--decorate-refs=refs/remotes/{r}"));
+        }
+        // HEAD leads the union. Passing only the watched refs would log
+        // *their* history and silently drop your own unmerged commits.
+        let mut revs = vec!["HEAD".to_string()];
+        revs.extend(live);
+        self.log_args(&revs, &decorate, limit)
+    }
+
     /// `git log [range]`, newest first. `range` is any revision range
     /// (`<base>..HEAD`); `None` walks all of HEAD's history.
     pub fn log_range(&self, range: Option<&str>, limit: usize) -> Result<Vec<CommitInfo>> {
+        let extra: Vec<String> = range.map(|r| vec![r.to_string()]).unwrap_or_default();
+        // No --decorate-refs: nothing is labelled in the single-ref views.
+        self.log_args(&extra, &[], limit)
+    }
+
+    /// The one `git log` invocation every history view goes through.
+    ///
+    /// `revs` are revision arguments (a range, or a list of refs to union);
+    /// `decorate` are `--decorate-refs=` flags bounding what gets labelled.
+    fn log_args(
+        &self,
+        revs: &[String],
+        decorate: &[String],
+        limit: usize,
+    ) -> Result<Vec<CommitInfo>> {
         let n = limit.to_string();
-        // NUL-separated because %s and %b are free-form; a commit message can
-        // contain anything except a NUL, which git itself forbids.
-        let mut args = vec![
+        // NUL-separated because %s, %b and %D are free-form; a commit message
+        // can contain anything except a NUL, which git itself forbids.
+        let mut args: Vec<&str> = vec![
             "log",
-            "--format=%H%x00%h%x00%an%x00%ad%x00%s%x00%b%x00",
+            "--format=%H%x00%h%x00%an%x00%ad%x00%s%x00%b%x00%D%x00",
             "--date=short",
             "-n",
             &n,
         ];
-        if let Some(range) = range {
-            args.push(range);
+        // `--decorate=short` is required: %D is empty without it.
+        if !decorate.is_empty() {
+            args.push("--decorate=short");
+            args.extend(decorate.iter().map(String::as_str));
         }
+        args.extend(revs.iter().map(String::as_str));
         let raw = self.git(&args)?;
         let text = String::from_utf8_lossy(&raw);
         let mut fields = text.split('\0');
         let mut commits = Vec::new();
-        while let (Some(sha), Some(short), Some(author), Some(date), Some(subject), Some(body)) = (
+        while let (
+            Some(sha),
+            Some(short),
+            Some(author),
+            Some(date),
+            Some(subject),
+            Some(body),
+            Some(decor),
+        ) = (
+            fields.next(),
             fields.next(),
             fields.next(),
             fields.next(),
@@ -520,9 +600,54 @@ impl Repo {
                 // git pads %b with a trailing newline, and emits nothing at
                 // all for a subject-only commit.
                 body: body.trim_end().to_string(),
+                // %D is ", "-separated and empty when nothing is decorated.
+                refs: decor
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect(),
             });
         }
         Ok(commits)
+    }
+
+    /// Update the watched refs from the remote. Returns the refs fetched.
+    ///
+    /// Only the named refs, never a bare `git fetch`: a working repo can have
+    /// hundreds of remote branches and there is no reason to drag all of them
+    /// every few minutes.
+    ///
+    /// Non-interactive by construction. A background fetch that stops to ask
+    /// for an SSH passphrase would hang forever with nothing on screen to
+    /// explain why, so it is told to fail instead of prompt.
+    pub fn fetch_refs(&self, refs: &[String]) -> Result<()> {
+        let remotes: Vec<&str> = refs
+            .iter()
+            .filter_map(|r| r.split_once('/'))
+            .map(|(remote, _)| remote)
+            .collect();
+        let Some(remote) = remotes.first().copied() else {
+            return Ok(()); // nothing remote-shaped to fetch
+        };
+        let branches: Vec<&str> = refs
+            .iter()
+            .filter_map(|r| r.strip_prefix(&format!("{remote}/")))
+            .collect();
+        let mut args = vec!["fetch", "--quiet", remote];
+        args.extend(&branches);
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(&self.root).args(&args);
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+        cmd.env(
+            "GIT_SSH_COMMAND",
+            "ssh -o BatchMode=yes -o ConnectTimeout=5",
+        );
+        let out = cmd.output().context("spawning git fetch")?;
+        if !out.status.success() {
+            bail!("{}", first_line(&String::from_utf8_lossy(&out.stderr)));
+        }
+        Ok(())
     }
 
     /// Files changed by one commit (vs its parent; root commits work too).

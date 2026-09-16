@@ -828,3 +828,95 @@ fn log_reads_full_commit_messages_including_multiline_bodies() {
     assert_eq!(commits[2].subject, "base");
     assert_eq!(commits[2].body, "");
 }
+
+/// The history can show another branch's commits alongside your own, so a
+/// push to staging turns up without leaving the view.
+///
+/// Two things here are easy to get wrong and invisible when you do: the union
+/// must actually include the other ref's commits, and decoration must be
+/// bounded — a real repo has hundreds of branches, and an unbounded
+/// `--decorate` tags each commit with every one that points at it.
+#[test]
+fn log_with_refs_unions_and_labels_only_the_watched_refs() {
+    let t = fixture("log-refs");
+
+    // A branch that is not HEAD and not watched — its label must not appear.
+    git(&t.dir, &["checkout", "-q", "-b", "noise"]);
+    write(&t.dir, "n.txt", "n\n");
+    git(&t.dir, &["add", "."]);
+    git(&t.dir, &["commit", "-q", "-m", "noise commit"]);
+
+    // The branch we care about — cut from main, NOT from noise, so noise's
+    // commit is not in its ancestry and a leak is a real leak.
+    git(&t.dir, &["checkout", "-q", "-b", "staging", "main"]);
+    write(&t.dir, "s.txt", "s\n");
+    git(&t.dir, &["add", "."]);
+    git(&t.dir, &["commit", "-q", "-m", "landed on staging"]);
+
+    // Back to our own work, which does not contain staging's commit.
+    git(&t.dir, &["checkout", "-q", "-b", "mine", "main"]);
+    write(&t.dir, "m.txt", "m\n");
+    git(&t.dir, &["add", "."]);
+    git(&t.dir, &["commit", "-q", "-m", "my work"]);
+
+    let watched = vec!["staging".to_string()];
+
+    // Without the union, staging's commit is simply not reachable.
+    let plain = t.repo.log_commits(50).unwrap();
+    assert!(
+        !plain.iter().any(|c| c.subject == "landed on staging"),
+        "plain HEAD log must not contain staging's commit"
+    );
+
+    let merged = t.repo.log_with_refs(&watched, 50).unwrap();
+    let subjects: Vec<&str> = merged.iter().map(|c| c.subject.as_str()).collect();
+    assert!(
+        subjects.contains(&"landed on staging"),
+        "staging's commit is missing: {subjects:?}"
+    );
+    assert!(
+        subjects.contains(&"my work"),
+        "own work missing: {subjects:?}"
+    );
+    assert!(
+        !subjects.contains(&"noise commit"),
+        "an unwatched branch leaked into the log: {subjects:?}"
+    );
+
+    // Labels: staging and HEAD are named, the unwatched branch is not.
+    let staging = merged
+        .iter()
+        .find(|c| c.subject == "landed on staging")
+        .unwrap();
+    assert!(
+        staging.refs.iter().any(|r| r.contains("staging")),
+        "staging commit is unlabelled: {:?}",
+        staging.refs
+    );
+    let all_refs: Vec<String> = merged.iter().flat_map(|c| c.refs.clone()).collect();
+    assert!(
+        !all_refs.iter().any(|r| r.contains("noise")),
+        "an unwatched ref was decorated: {all_refs:?}"
+    );
+    // And most commits carry no label at all — that is what keeps the row
+    // width usable in a narrow pane.
+    assert!(
+        merged.iter().filter(|c| c.refs.is_empty()).count() >= 1,
+        "expected undecorated commits: {merged:?}"
+    );
+}
+
+/// A ref list is config, reused across repos with different branch names.
+/// A missing ref must not abort the whole log.
+#[test]
+fn a_watched_ref_that_does_not_exist_is_ignored() {
+    let t = fixture("log-refs-missing");
+    let watched = vec!["origin/nope".to_string(), "also-missing".to_string()];
+
+    assert!(t.repo.existing_refs(&watched).is_empty());
+    let commits = t.repo.log_with_refs(&watched, 10).unwrap();
+    assert!(
+        commits.iter().any(|c| c.subject == "base"),
+        "log fell over instead of ignoring the missing refs: {commits:?}"
+    );
+}

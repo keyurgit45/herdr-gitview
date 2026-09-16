@@ -96,6 +96,12 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         (None, Mode::Log) if app.log_branch_only => {
             format!(" log · vs {} · {branch}", base_label(app))
         }
+        // Name the extra refs: the whole reason to be in this view may be
+        // "did anything land on staging", and a header that just says "all
+        // commits" does not tell you whether staging is even being watched.
+        (None, Mode::Log) if !app.cfg.log_refs.is_empty() => {
+            format!(" log · {} + {branch}", app.cfg.log_refs.join(" "))
+        }
         (None, Mode::Log) => format!(" log · all commits · {branch}"),
         (None, Mode::CommitFiles) => match &app.commit {
             Some(c) => format!(" {} {}", c.short, c.subject),
@@ -372,20 +378,58 @@ fn note_row(note: &crate::ipc::NoteMeta, width: u16) -> ListItem<'static> {
     ])
 }
 
-/// One commit row: `<short> <subject>  <date>`.
+/// One commit row: `<short> [<refs>] <subject>  <date>`.
+///
+/// The ref label comes before the subject because it is the thing you scan
+/// for — "did anything land on staging" is answered by the label, not the
+/// message. Only watched refs are ever present (see `Repo::log_with_refs`),
+/// so the vast majority of rows carry none and keep the full width.
 fn commit_row(c: &CommitInfo, width: u16) -> ListItem<'static> {
     let width = width as usize;
     let short = format!(" {} ", c.short);
     let date = format!("{} ", c.date);
-    let avail = width.saturating_sub(short.width() + date.width() + 1);
+    let label = ref_label(&c.refs);
+    let avail = width.saturating_sub(short.width() + label.width() + date.width() + 1);
     let subject = elide_tail(&c.subject, avail);
-    let pad = width.saturating_sub(short.width() + subject.width() + date.width());
-    ListItem::new(Line::from(vec![
-        Span::styled(short, Style::new().fg(palette::ACCENT)),
-        Span::raw(subject),
-        Span::raw(" ".repeat(pad)),
-        Span::styled(date, dim()),
-    ]))
+    let pad = width.saturating_sub(short.width() + label.width() + subject.width() + date.width());
+    let mut spans = vec![Span::styled(short, Style::new().fg(palette::ACCENT))];
+    if !label.is_empty() {
+        spans.push(Span::styled(label, Style::new().fg(palette::INFO)));
+    }
+    spans.push(Span::raw(subject));
+    spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(Span::styled(date, dim()));
+    ListItem::new(Line::from(spans))
+}
+
+/// `origin/staging` → `[staging] `, `HEAD -> feat/x` → `[feat/x] `.
+///
+/// Only a leading `origin/` is dropped — in a 40-column pane those seven
+/// columns say nothing you did not already know. Nothing else is stripped:
+/// slashes are ordinary in branch names, and taking the first path segment
+/// off `feat/ers-pronunciation` would quietly retitle somebody's branch.
+///
+/// A remote that is not called `origin` shows in full. Verbose, but honest.
+fn ref_label(refs: &[String]) -> String {
+    if refs.is_empty() {
+        return String::new();
+    }
+    let names: Vec<&str> = refs
+        .iter()
+        .map(|r| {
+            // "HEAD -> branch" keeps the branch; a bare "HEAD" keeps HEAD.
+            let r = r.rsplit(" -> ").next().unwrap_or(r);
+            r.strip_prefix("origin/").unwrap_or(r)
+        })
+        .collect();
+    // A commit can carry both refs/heads/staging and refs/remotes/o/staging.
+    let mut seen: Vec<&str> = Vec::new();
+    for n in names {
+        if !seen.contains(&n) {
+            seen.push(n);
+        }
+    }
+    format!("[{}] ", seen.join(", "))
 }
 
 fn marker(kind: ChangeKind) -> (char, Color) {
@@ -704,5 +748,36 @@ fn base_label(app: &App) -> &str {
         "base"
     } else {
         &app.base
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ref_label;
+
+    /// Slashes are ordinary in branch names. An earlier version took the
+    /// first path segment off every ref to drop "origin/", which also
+    /// retitled `feat/ers-pronunciation` to `ers-pronunciation` — a branch
+    /// label that names a branch nobody has.
+    #[test]
+    fn only_the_origin_prefix_is_stripped_from_a_label() {
+        assert_eq!(ref_label(&["origin/staging".into()]), "[staging] ");
+        assert_eq!(
+            ref_label(&["HEAD -> feat/ers-pronunciation".into()]),
+            "[feat/ers-pronunciation] "
+        );
+        // A remote that is not `origin` keeps its prefix rather than losing
+        // the first half of the branch name.
+        assert_eq!(ref_label(&["upstream/main".into()]), "[upstream/main] ");
+        assert_eq!(ref_label(&[]), "");
+    }
+
+    /// A commit can be pointed at by both the local branch and its remote.
+    #[test]
+    fn a_label_does_not_repeat_the_same_branch_twice() {
+        assert_eq!(
+            ref_label(&["origin/staging".into(), "staging".into()]),
+            "[staging] "
+        );
     }
 }

@@ -35,6 +35,8 @@ pub fn run() -> Result<()> {
     let (keys, keymap_err) = build_keymap(&cfg);
     let repo = resolve_repo()?;
     let poll_ms = cfg.poll_ms;
+    let fetch_interval_ms = cfg.fetch_interval_ms;
+    let log_refs = cfg.log_refs.clone();
     let root = repo.root.clone();
     let env = HostEnv::from_process();
 
@@ -56,7 +58,15 @@ pub fn run() -> Result<()> {
     let mut session = Session::new(app, env, tx.clone(), popup_supported);
 
     if poll_ms > 0 {
-        spawn_poll_thread(tx.clone(), session.shared_handle(), Repo { root }, poll_ms);
+        spawn_poll_thread(
+            tx.clone(),
+            session.shared_handle(),
+            Repo { root: root.clone() },
+            poll_ms,
+        );
+    }
+    if fetch_interval_ms > 0 && !log_refs.is_empty() {
+        spawn_fetch_thread(Repo { root }, log_refs, fetch_interval_ms);
     }
     // Connect to the preview in the background so a slow/absent preview
     // never blanks or blocks the list UI; the Conn arrives as an event.
@@ -159,6 +169,49 @@ fn spawn_poll_thread(tx: Sender<Event>, shared: Arc<Mutex<Shared>>, repo: Repo, 
                 && tx.send(Event::Refresh(entries)).is_err()
             {
                 break;
+            }
+        }
+    });
+}
+
+/// Keep the watched refs current so the history shows a push that landed
+/// while you were working, rather than whatever your last manual fetch saw.
+///
+/// Single-flighted through a timestamp file keyed by repo. Linked worktrees
+/// share one object store, so the four gitview instances in a herdr session
+/// would otherwise all fetch the same repo on the same timer and collide on
+/// git's ref lock. The stamp is claimed *before* fetching, which makes the
+/// race window the length of one file write rather than one network round
+/// trip.
+///
+/// Every failure is swallowed: being offline, on a VPN, or without a loaded
+/// SSH key is ordinary, and a background refresh is not worth interrupting
+/// the view for. `Repo::fetch_refs` is non-interactive, so a missing key
+/// fails fast instead of hanging on a passphrase prompt nobody can see.
+fn spawn_fetch_thread(repo: Repo, refs: Vec<String>, interval_ms: u64) {
+    thread::spawn(move || {
+        let interval = Duration::from_millis(interval_ms);
+        let stamp = crate::logx::state_dir().join("fetch").join(format!(
+            "{}.stamp",
+            crate::orchestrate::repo_hash(&repo.root)
+        ));
+        if let Some(dir) = stamp.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        loop {
+            thread::sleep(interval);
+            // Someone else already fetched inside this window.
+            let fresh = std::fs::metadata(&stamp)
+                .and_then(|m| m.modified())
+                .map(|t| t.elapsed().unwrap_or(interval) < interval)
+                .unwrap_or(false);
+            if fresh {
+                continue;
+            }
+            let _ = std::fs::write(&stamp, b""); // claim before the slow part
+            match repo.fetch_refs(&refs) {
+                Ok(()) => crate::logx::log(format!("fetched {}", refs.join(" "))),
+                Err(e) => crate::logx::log(format!("background fetch failed: {e}")),
             }
         }
     });

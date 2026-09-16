@@ -19,6 +19,32 @@ editor = ["nvim"]
 # value is floored at 250 ms so a tiny interval can't hammer git.
 poll_ms = 2000
 
+# Extra refs the commit history (`l`) shows alongside HEAD, so a push to an
+# integration branch turns up without leaving the view. Their commits are
+# interleaved by date and labelled, e.g. `[staging]`.
+#
+# Deliberately a short list rather than every branch: a working repo can carry
+# hundreds, and interleaving all of them buries your own history. This list
+# also bounds which refs get labelled — a commit can be pointed at by dozens.
+#
+# Refs that don't exist in a repo are dropped silently, so one config works
+# across repos with different branch names. [] disables the whole feature.
+log_refs = ["origin/staging"]
+
+# How often to `git fetch` those refs, in milliseconds; 0 disables it. A
+# remote ref only moves when something fetches, so without this the history
+# is as stale as your last manual `git fetch` — and a push you were waiting
+# for simply won't appear.
+#
+# Only the watched refs are fetched, never the whole remote. The fetch is
+# non-interactive (it fails rather than prompting for an SSH passphrase), and
+# failures are silent: offline is normal. Instances sharing a repo — linked
+# worktrees in one herdr session — single-flight through a timestamp file, so
+# four views don't mean four fetches.
+#
+# Floored at 30 s when non-zero. This is network I/O, not a local poll.
+fetch_interval_ms = 300000
+
 # Which scope the view opens in: "worktree" (staged/unstaged changes) or
 # "branch" (diff vs the merge base). `w` toggles at runtime.
 default_scope = "worktree"

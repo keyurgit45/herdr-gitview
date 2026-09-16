@@ -468,8 +468,12 @@ impl App {
     /// Load the commit vector the current log filter asks for.
     fn load_commits(&self) -> Result<Vec<CommitInfo>> {
         match (self.log_branch_only, self.merge_base.as_deref()) {
+            // Branch-only is "what did *I* add" — another branch's commits
+            // would defeat the whole point of the filter.
             (true, Some(mb)) => self.repo.log_branch_commits(mb, LOG_LIMIT),
-            _ => self.repo.log_commits(LOG_LIMIT),
+            // Full history is where the watched refs belong: this is the view
+            // you open to see whether anything landed on staging.
+            _ => self.repo.log_with_refs(&self.cfg.log_refs, LOG_LIMIT),
         }
     }
 
